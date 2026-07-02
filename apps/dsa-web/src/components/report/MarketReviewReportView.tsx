@@ -15,6 +15,21 @@ import { Card } from '../common';
 import { Tooltip } from '../common/Tooltip';
 import { ReportMarkdownBody } from './ReportMarkdownBody';
 
+const formatIndexNumber = (value: number | string | null | undefined, decimals = 2): string => {
+  if (value === null || value === undefined || value === '') return '—';
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '—';
+  return num.toFixed(decimals);
+};
+
+const formatIndexChangePct = (value: number | string | null | undefined, decimals = 2): string => {
+  if (value === null || value === undefined || value === '') return '—';
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '—';
+  const sign = num > 0 ? '+' : num < 0 ? '' : '';
+  return `${sign}${num.toFixed(decimals)}%`;
+};
+
 interface MarketReviewReportViewProps {
   report?: AnalysisReport;
   recordId?: number;
@@ -571,9 +586,9 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                         {marketData.indices.map((index) => (
                           <tr key={index.code || index.name}>
                             <td className="px-2 py-2 font-medium text-foreground">{index.name}</td>
-                            <td className="px-2 py-2 text-secondary-text">{index.current ?? '-'}</td>
-                            <td className="px-2 py-2 text-secondary-text">{index.changePct !== undefined ? `${index.changePct}%` : '-'}</td>
-                            <td className="px-2 py-2 text-secondary-text">{index.high ?? '-'} / {index.low ?? '-'}</td>
+                            <td className="px-2 py-2 text-secondary-text">{formatIndexNumber(index.current)}</td>
+                            <td className="px-2 py-2 text-secondary-text">{formatIndexChangePct(index.changePct)}</td>
+                            <td className="px-2 py-2 text-secondary-text">{formatIndexNumber(index.high)} / {formatIndexNumber(index.low)}</td>
                           </tr>
                         ))}
                       </tbody>
