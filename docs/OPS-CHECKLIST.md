@@ -90,7 +90,7 @@ analyzer:
 ```
 但这些顶层字段在 compose v2 已 deprecated,推荐写法就是 **`deploy.resources.limits.memory` + `deploy.restart_policy.condition: on-failure`**,**这套标准写法足够,不要碰 `memory-swap`。**
 
-### P0-3:sshd 死了能自愈
+### P0-3:sshd 死了能自愈(⚠️ **只能救"sshd 自己 crash",救不了"宿主 OOM 把 systemd + sshd 一起杀"**)
 
 ```bash
 ssh root@147.139.145.89 '
@@ -106,6 +106,72 @@ EOF
   systemctl restart sshd
 '
 ```
+
+**踩坑警告(2026-07-02 复发 OOM 教训):** `Restart=on-failure` 仅对 sshd **自身 clean crash** 有效。
+
+如果宿主 OOM killer **杀的不是 sshd 而是 systemd 自己** (`systemd --user` / `systemd-logind` / `dbus-daemon` 这类核心), 或者 OOM 引发 docker daemon 进入 hang 状态,systemd 的 Restart 规则可能根本来不及触发。**这是 24h 内第二次 OOM sshd 卡 banner 的根因** —— 不是"sshd 自愈配置没生效",而是"那种 OOM 根本不是 systemd 救得了的事"。
+
+**真正的终极修法(必做):** 改写 docker / sshd 的 OOMScoreAdjustment(让他们 OOM killer 不优先杀他们),详见 P0-4。
+
+---
+
+### P0-4 ⚠️ 新增:保护 systemd + sshd + docker 不被宿主 OOM 杀(OOMScoreAdjustment)
+
+**严重警告:** 上面的 P0-3 不够,以下是真正抗宿主 OOM 的修法。
+
+OOM killer 按 `oom_score_adj` 选目标杀进程。我们要把 sshd / docker / systemd 的 OOMScore 调到很负,这样 OOM 不优先杀它们:
+
+```bash
+ssh root@147.139.145.89 '
+  # 1) sshd 永久保护
+  mkdir -p /etc/systemd/system/sshd.service.d/
+  cat > /etc/systemd/system/sshd.service.d/recovery.conf << EOF
+[Service]
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+OOMScoreAdjust=-900
+OOMPolicy=continue
+EOF
+
+  # 2) docker 保护(让它挂之前先杀容器进程,不杀 docker daemon)
+  mkdir -p /etc/systemd/system/docker.service.d/
+  cat > /etc/systemd/system/docker.service.d/oom-guard.conf << EOF
+[Service]
+OOMScoreAdjust=-900
+EOF
+  systemctl daemon-reload
+  systemctl restart docker
+  # 注:重启 docker 会瞬断所有容器几秒,大盘 / WebUI 也会断 ~5-10s
+'
+```
+
+`OOMScoreAdjust=-900` + `OOMPolicy=continue`(systemd 230+)语义:
+- OOM killer 不优先选他们(分数被压到负)
+- OOMPolicy=continue 当真被杀时不再 panic loop
+
+**光有这个还不够**,还需要:
+- **swap 够(✅ 9Gi,我们已有)**
+- **容器 memory 上限 + max-attempts 限制(✅ P0-2,已有 1Gi)**
+- **禁止会引发死锁的 flag(新增 P0-4b:ban `--force-run`,见下)**
+
+---
+
+### P0-4b ⚠️ 新增:Ban `--force-run` 这个危险 flag
+
+`--force-run` 在大盘复盘场景触发完整 6 指数抓取 + LiteLLM stream + non-stream 双 retry + 全文渲染 + 邮件 + Markdown 落盘,**任意一步卡都会拖整个调用链 → docker daemon 状态堆栈挂住**。这是 2026-07-02 第二次 OOM 的直接诱因。
+
+**以后绝不能用 `--force-run`,走 `--market-review --region us` 默认逻辑**,DSA 自己判断 cache 是否新鲜。需要"强制清缓存跑"的话:
+```bash
+# 在 analyzer 容器里手工删 cache(可控),然后 --market-review
+ssh root@147.139.145.89 '
+  docker exec stock-analyzer rm -f /app/data/market_review_cache.json 2>/dev/null || true
+  docker exec -e MARKET_REVIEW_REGION=us stock-analyzer python main.py --market-review --region us
+'
+```
+
+或者改代码把 `--force-run` flag 移除 / 改成 dry-run。
 
 ### P1-4:SSH 密码忘了也是灾难 → 加 SSH key 备援
 
