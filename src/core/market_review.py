@@ -478,8 +478,21 @@ def _build_combined_market_review_payload(
 ) -> Dict[str, Any]:
     normalized_language = normalize_report_language(language)
     title = root_title.lstrip("#").strip()
-    if len(payloads) == 1:
-        payload = dict(next(iter(payloads.values())))
+    # 用每个市场在 _MARKET_REVIEW_MARKETS 里的标准 title_key 强制覆盖 payload.title，
+    # 避免 LLM 生成时漏掉港股/美股等区域名前缀（导致 WebUI 重复显示“{date} 大盘复盘”）
+    review_text = _get_market_review_text(normalized_language)
+    normalized_payloads: Dict[str, Dict[str, Any]] = {}
+    for mkt, title_key, _label in _MARKET_REVIEW_MARKETS:
+        if mkt not in payloads:
+            continue
+        payload_copy = dict(payloads[mkt])
+        market_title_template = review_text.get(title_key, "")
+        if market_title_template:
+            payload_copy["title"] = market_title_template.lstrip("#").strip()
+        normalized_payloads[mkt] = payload_copy
+
+    if len(normalized_payloads) == 1:
+        payload = dict(next(iter(normalized_payloads.values())))
         payload["version"] = payload.get("version") or 1
         payload["kind"] = MARKET_REVIEW_REPORT_TYPE
         payload["region"] = region
@@ -494,7 +507,7 @@ def _build_combined_market_review_payload(
         "language": normalized_language,
         "title": title,
         "root_title": title,
-        "markets": payloads,
+        "markets": normalized_payloads,
         "markdown_report": review_report,
     }
 
