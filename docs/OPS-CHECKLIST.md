@@ -173,6 +173,49 @@ ssh root@147.139.145.89 '
 
 或者改代码把 `--force-run` flag 移除 / 改成 dry-run。
 
+---
+
+## ⚠️ 紧急状态(2026-07-02 18:00 之前必须做完)
+
+**24h 内 3 次 OOM 复发**(`swap 9Gi` + `docker 1Gi` 限制 + `OOMScore drop-in` 都没装完就又死了):
+- 加固方案没有击中根因
+- 真因疑似 DSA `get_main_indices` / yfinance / LiteLLM 死锁(在 Workbench 日志里"卡在 get_main_indices status=start")
+- crontab scheduler 18:00 自动跑大盘复盘是下次 OOM 高概率诱因
+
+**Workbench 救活后第一时间执行(必须):**
+```bash
+# 1) 救活 sshd
+systemctl restart sshd; sleep 3
+# 2) 立即禁自动跑(避免下次 18:00 又死)
+sed -i 's|^SCHEDULE_ENABLED=.*|SCHEDULE_ENABLED=false|' /opt/dsa/.env
+sed -i 's|^RUN_IMMEDIATELY=.*|RUN_IMMEDIATELY=false|' /opt/dsa/.env
+# 3) 杀 crontab 里所有 DSA 相关任务
+crontab -l 2>/dev/null | grep -v "market_review\|DSA\|stock-analyzer" | crontab -
+# 4) 关掉 analyzer 容器里一切正在跑的进程
+docker exec stock-analyzer pkill -9 -f "python main.py" || true
+docker restart stock-analyzer stock-server
+# 5) 看 dmesg 找元凶进程
+dmesg --since "-24h" | grep -iE "killed|out of memory" | tail -20
+# 6) 收集证据(把以下 4 段贴给我,不要分析,直接贴):
+free -h
+df -h /opt/dsa
+uptime
+docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Size}}"
+```
+
+**禁止动作(直到根因诊断清楚):**
+- ❌ 不能再跑 `python main.py --market-review --force-run`
+- ❌ 不能再跑 `python main.py --market-review` 自动大盘复盘路径(必须先 debug)
+- ❌ 不要让 scheduler 自动跑
+- ❌ 不要再做"加固"层(已经没有意义,得 debug 代码)
+
+**根因诊断方向(下一步):**
+1. 把 dmesg 完整 OOM 段贴出来 — 哪个 python 进程被杀?`/usr/bin/python` / `python3` / `litellm` ?
+2. `cat /opt/dsa/logs/*.log | tail -200` 看 yfinance / LiteLLM 哪个 API 卡住
+3. 如果是 yfinance 死锁,考虑换数据源(efinance 已经有,优先试试,国内 IP 更稳)
+4. 如果是 LiteLLM stream 死锁,临时禁用 stream(`LITELLM_DISABLE_STREAMING=true` in .env)
+5. 写一个 `src/llm/__init__.py` 加 timeout + retry 限速,避免 OOM
+
 ### P1-4:SSH 密码忘了也是灾难 → 加 SSH key 备援
 
 ```bash
