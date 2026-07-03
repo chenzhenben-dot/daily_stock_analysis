@@ -636,6 +636,9 @@ class HistoryService:
                     "title": record.title,
                     "snippet": snippet,
                     "url": record.url,
+                    "sentiment": getattr(record, "sentiment", None),
+                    "sentiment_confidence": getattr(record, "sentiment_confidence", None),
+                    "sentiment_reason": getattr(record, "sentiment_reason", None),
                 })
 
             return items

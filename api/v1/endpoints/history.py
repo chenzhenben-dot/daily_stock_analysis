@@ -671,7 +671,10 @@ def get_history_news(
             NewsIntelItem(
                 title=item.get("title", ""),
                 snippet=item.get("snippet"),
-                url=item.get("url", "")
+                url=item.get("url", ""),
+                sentiment=item.get("sentiment"),
+                sentiment_confidence=item.get("sentiment_confidence"),
+                sentiment_reason=item.get("sentiment_reason"),
             )
             for item in items
         ]

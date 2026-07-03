@@ -590,6 +590,14 @@ class StockAnalysisPipeline:
                                 )
                     except Exception as e:
                         logger.warning(f"{stock_name}({code}) 保存新闻情报失败: {e}")
+
+                    # Step 4b: LLM 批量给新闻打情感标签 (利好/利空/中性)
+                    # 失败仅降级, 不影响主流程
+                    self._classify_news_sentiment_safe(
+                        query_id=query_id,
+                        code=code,
+                        stock_name=stock_name,
+                    )
             else:
                 logger.info(f"{stock_name}({code}) 搜索服务不可用，跳过情报搜索")
 
@@ -2743,7 +2751,66 @@ class StockAnalysisPipeline:
             })
 
         return context
-    
+
+    def _classify_news_sentiment_safe(
+        self,
+        query_id: str,
+        code: str,
+        stock_name: str,
+    ) -> None:
+        """Best-effort LLM sentiment tagging for news collected by this query.
+
+        Failures degrade silently (sentiment stays NULL → UI shows neutral).
+        Designed to never block the main pipeline.
+        """
+        # Skip short batches — too few rows to justify an LLM round-trip.
+        min_batch = 3
+        try:
+            news_rows = self.db.get_news_intel_by_query_id(query_id, limit=50)
+        except Exception as exc:
+            logger.debug(
+                "news sentiment: failed to load rows for %s(%s): %s",
+                stock_name, code, exc,
+            )
+            return
+        unscored = [row for row in news_rows if not getattr(row, "sentiment", None)]
+        if len(unscored) < min_batch:
+            logger.info(
+                "news sentiment: %s(%s) has %d rows (< %d), skip",
+                stock_name, code, len(unscored), min_batch,
+            )
+            return
+
+        from src.services.news_sentiment import (
+            classify_news_sentiment,
+            normalize_sentiment_rows,
+        )
+
+        model_name = getattr(self.config, "litellm_model", None)
+        try:
+            results = classify_news_sentiment(
+                unscored,
+                analyzer=self.analyzer,
+                model=model_name,
+            )
+            normalized = normalize_sentiment_rows(
+                results,
+                {int(row.id): row for row in unscored},
+            )
+            updated = self.db.update_news_sentiment(
+                normalized,
+                model_name=model_name,
+            )
+            logger.info(
+                "news sentiment: %s(%s) classified %d/%d news",
+                stock_name, code, updated, len(unscored),
+            )
+        except Exception as exc:
+            logger.warning(
+                "news sentiment: %s(%s) classification failed, fall through to neutral: %s",
+                stock_name, code, exc,
+            )
+
     def process_single_stock(
         self,
         code: str,

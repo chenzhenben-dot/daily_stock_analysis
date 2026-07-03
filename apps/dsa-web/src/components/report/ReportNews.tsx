@@ -32,6 +32,45 @@ const NEWS_SOURCE_TEXT = {
 /**
  * 资讯区组件 - 终端风格
  */
+
+type Sentiment = 'positive' | 'negative' | 'neutral';
+
+const SENTIMENT_META: Record<Sentiment, { label: string; icon: string; cls: string; ariaLabel: string }> = {
+  positive: {
+    label: '利好',
+    icon: '▲',
+    cls: 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/40',
+    ariaLabel: '利好新闻',
+  },
+  negative: {
+    label: '利空',
+    icon: '▼',
+    cls: 'bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/40',
+    ariaLabel: '利空新闻',
+  },
+  neutral: {
+    label: '中性',
+    icon: '■',
+    cls: 'bg-slate-500/15 text-slate-300 ring-1 ring-slate-500/40',
+    ariaLabel: '中性新闻',
+  },
+};
+
+const SentimentBadge: React.FC<{ sentiment: Sentiment; reason?: string | null }> = ({ sentiment, reason }) => {
+  const meta = SENTIMENT_META[sentiment] ?? SENTIMENT_META.neutral;
+  return (
+    <span
+      role="status"
+      aria-label={meta.ariaLabel}
+      title={reason || meta.label}
+      className={`inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium ${meta.cls}`}
+    >
+      <span aria-hidden="true">{meta.icon}</span>
+      <span>{meta.label}</span>
+    </span>
+  );
+};
+
 export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 8, language = 'zh' }) => {
   const reportLanguage = normalizeReportLanguage(language);
   const text = getReportText(reportLanguage);
@@ -135,9 +174,17 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 8, lan
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0 text-left">
-                  <p className="home-news-title text-sm font-medium leading-6 text-foreground text-left">
-                    {item.title}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {item.sentiment ? (
+                      <SentimentBadge
+                        sentiment={item.sentiment}
+                        reason={item.sentimentReason}
+                      />
+                    ) : null}
+                    <p className="home-news-title text-sm font-medium leading-6 text-foreground text-left">
+                      {item.title}
+                    </p>
+                  </div>
                   {item.snippet && (
                     <p className="home-news-snippet mt-2 text-sm leading-6 text-secondary-text text-left overflow-hidden [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">
                       {item.snippet}

@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from datetime import datetime, date, timedelta, timezone
-from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple, Callable, TypeVar, Union
+from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple, Callable, TypeVar, Union, Iterable
 
 import pandas as pd
 from sqlalchemy import (
@@ -204,6 +204,13 @@ class NewsIntel(Base):
     requester_chat_id = Column(String(64))
     requester_message_id = Column(String(64))
     requester_query = Column(String(255))
+
+    # LLM 情感分类（positive / negative / neutral）
+    sentiment = Column(String(16), index=True)
+    sentiment_confidence = Column(Float)
+    sentiment_reason = Column(String(500))
+    sentiment_model = Column(String(64))
+    sentiment_classified_at = Column(DateTime)
 
     __table_args__ = (
         UniqueConstraint('url', name='uix_news_url'),
@@ -854,6 +861,14 @@ _LLM_USAGE_TELEMETRY_COLUMN_SQL: Dict[str, str] = {
     "approx_common_prefix_tokens": "INTEGER",
     "known_dynamic_marker_positions": "TEXT",
 }
+
+_NEWS_SENTIMENT_COLUMN_SQL: Dict[str, str] = {
+    "sentiment": "VARCHAR(16)",
+    "sentiment_confidence": "FLOAT",
+    "sentiment_reason": "VARCHAR(500)",
+    "sentiment_model": "VARCHAR(64)",
+    "sentiment_classified_at": "DATETIME",
+}
 _LLM_USAGE_INTEGER_TELEMETRY_COLUMNS = {
     column
     for column, column_type in _LLM_USAGE_TELEMETRY_COLUMN_SQL.items()
@@ -1181,6 +1196,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             # 创建所有表
             Base.metadata.create_all(self._engine)
             self._ensure_llm_usage_telemetry_columns()
+            self._ensure_news_sentiment_columns()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
@@ -1372,6 +1388,54 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                         logger.warning(
                             "[LLM usage] SQLite telemetry column backfill locked, "
                             "retrying: %s (%s/%s, %.2fs)",
+                            column,
+                            attempt + 1,
+                            max_retries,
+                            delay,
+                        )
+                        if delay > 0:
+                            time.sleep(delay)
+                        continue
+                    raise
+
+    def _ensure_news_sentiment_columns(self) -> None:
+        """Add nullable sentiment columns to news_intel for existing SQLite DBs."""
+        if not self._is_sqlite_engine:
+            return
+        try:
+            existing = {
+                column["name"]
+                for column in inspect(self._engine).get_columns(NewsIntel.__tablename__)
+            }
+        except Exception as exc:
+            logger.warning(
+                "[news sentiment] failed to inspect columns; "
+                "skipping best-effort SQLite sentiment column backfill: %s",
+                exc,
+            )
+            return
+
+        max_retries = self._sqlite_write_retry_max
+        for column, column_type in _NEWS_SENTIMENT_COLUMN_SQL.items():
+            if column in existing:
+                continue
+            for attempt in range(max_retries + 1):
+                try:
+                    with self._engine.begin() as connection:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE {NewsIntel.__tablename__} "
+                            f"ADD COLUMN {column} {column_type}"
+                        )
+                    existing.add(column)
+                    break
+                except OperationalError as exc:
+                    if self._is_sqlite_duplicate_column_error(exc, column):
+                        existing.add(column)
+                        break
+                    if self._is_sqlite_locked_error(exc) and attempt < max_retries:
+                        delay = self._sqlite_write_retry_base_delay * (2 ** attempt)
+                        logger.warning(
+                            "[news sentiment] SQLite backfill locked, retrying: %s (%s/%s, %.2fs)",
                             column,
                             attempt + 1,
                             max_retries,
@@ -1886,6 +1950,38 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             ).scalars().all()
 
             return list(results)
+
+    def update_news_sentiment(
+        self,
+        rows: Iterable[tuple[int, str, float, str]],
+        model_name: Optional[str] = None,
+    ) -> int:
+        """Persist LLM-classified sentiment for a batch of news_intel rows.
+
+        Each row is ``(news_id, sentiment, confidence, reason)``. ``sentiment``
+        must be one of ``positive`` / ``negative`` / ``neutral``; ``confidence``
+        is clamped to ``[0.0, 1.0]`` by callers.
+        """
+        from sqlalchemy import update
+
+        rows = list(rows)
+        if not rows:
+            return 0
+        now = datetime.now()
+        with self.get_session() as session:
+            for news_id, sentiment, confidence, reason in rows:
+                session.execute(
+                    update(NewsIntel)
+                    .where(NewsIntel.id == news_id)
+                    .values(
+                        sentiment=sentiment,
+                        sentiment_confidence=confidence,
+                        sentiment_reason=reason,
+                        sentiment_model=model_name,
+                        sentiment_classified_at=now,
+                    )
+                )
+        return len(rows)
 
     def save_analysis_history(
         self,

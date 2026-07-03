@@ -448,6 +448,9 @@ export interface NewsIntelItem {
   title: string;
   snippet: string;
   url: string;
+  sentiment?: 'positive' | 'negative' | 'neutral' | null;
+  sentimentConfidence?: number | null;
+  sentimentReason?: string | null;
 }
 
 /** News response */
