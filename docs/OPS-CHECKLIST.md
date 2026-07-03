@@ -447,3 +447,133 @@ ssh root@147.139.145.89 '
 - 遇到新故障先查 §4 SOP,不在的话追加新条目
 
 **下次故障怎么 check**: 三步走 → §3 巡检 → §4 SOP → §2 检查对应 P 项是否完成。
+
+---
+
+## 10. equity-research 数据源规则 v2(融合 DSA 模式 + equity 特有)
+
+> **背景(2026-07-03 沉淀):** 跑台积电 (TSM) 分析时复盘,发现 DSA 项目的"priority + fallback + timeout"模式值得借鉴,但 equity-report 还有 DSA 没有的"质量评分"和"前瞻数据"需求。这章是**所有 equity-research 分析(新公司 / 旧公司 retro)统一规则**。下次做新公司(NVDA / Apple / 任何)直接按这 5 条 priority 链跑,不依赖单一 stockanalysis。
+
+### 10.1 借鉴自 DSA 的 3 个核心原则
+
+**Priority + Fallback 链**(整套设计的灵魂)
+- 每类数据一条 priority 链(0 最先,4 最后,失败自动降级)
+- env var 可配置,用户能改
+- 失败时优雅降级,不会"一个源挂整个流程死"
+
+**Timeout 保护**(每个源都设)
+- **DSA 默认 30s 太长**,equity 实时数据要快 — 8-15s 看数据类型
+- 不设 timeout 的教训:2026-07-02 SPCX 调研时 10 分钟卡死没人管
+
+**注释 + 可配置**(每个源都有"为什么用 / 什么时候用 / 限制")
+- 不是"用这个 source"就完事,要写明好处 + 限制 + 数据延迟
+
+### 10.2 equity-research 特有(DSR 没有的 3 个)
+
+**A. 数据点 A/B/C/D 等级标签**
+- DSA 数据源机读无所谓等级,equity 报告每条数字要让读者知道可信度
+- `[A]` 10-K / 一手 + 多源验证
+- `[B]` Wikipedia / 二手 / 单一权威
+- `[C]` 行业估算 / 反推
+- `[D]` 推测 / 弱证据
+
+**B. 看板底部"质量摘要"**
+- 占比% 显示:整体 A 占 50% / B 占 25% / C 占 20% / D 占 5% = B+ 级
+- 一眼看出哪些数字硬哪些软
+
+**C. Action tag 跟 quality 挂钩**
+- 数据 ≥70% A → 可给 buy
+- 30-70% A → wait / try
+- <30% A → watch / avoid(数据不足以支撑动作)
+
+### 10.3 5 条 priority 链(下次分析必跑)
+
+**链 1: 价格 + 估值倍数**
+```
+primary:  stockanalysis.com (Fiscal.ai 后端)
+fallback: Yahoo Finance
+tertiary: 自己 curl SEC EDGAR
+TIMEOUT:  8s
+DOC:      "实时共识;stockanalysis 免费 tier 有 ~15min 延迟"
+```
+
+**链 2: 财务数据 / 财报**
+```
+primary:  SEC EDGAR (10-K / 10-Q / 20-F)  ← 必须真去拉,不是只引用
+fallback: stockanalysis.com (Fiscal.ai)
+tertiary: 公司 IR
+TIMEOUT:  15s
+DOC:      "primary 是金标准;fallback 聚合数据可能有 ~5% 误差"
+```
+
+**链 3: 客户 / 行业份额 / 竞对**
+```
+primary:  公司 10-K 风险因素段(实际披露的前 N 大客户)
+fallback: Wikipedia + TrendForce / IDC 公开报告
+tertiary: 反推(标 C — 之前我没标,现在强制)
+TIMEOUT:  10s
+DOC:      "客户占比 10-K 通常不单独披露,只能反推"
+```
+
+**链 4: Forward Guidance(前瞻)**
+```
+primary:  Earnings call transcript(Seeking Alpha / Motley Fool)
+fallback: 卖方研报(找免费能拿到的)
+tertiary: 共识(标 C,consensus 通常滞后 1 季度)
+TIMEOUT:  15s
+DOC:      "Q2 财报后第一时间拉 transcript;这是未来业绩源头"
+```
+
+**链 5: 新闻 / 地缘风险 / 突发**
+```
+primary:  Reuters / Bloomberg(机构来源,月费)
+fallback: Wikipedia current events + Investing.com
+tertiary: my memory(标 D)
+TIMEOUT:  8s
+DOC:      "地缘事件几小时内影响估值,必须实时拉"
+```
+
+### 10.4 强制给每个数据点打 [A/B/C/D] 标签
+
+格式:数据点后挂小标签,例:
+```
+Apple  ~22-25% [C]  ← 反推,不是 10-K 披露
+NVIDIA  ~13-15% [C]  ← 反推
+Forward P/E  23.14x [A]  ← stockanalysis 实时共识
+毛利率 60% [A]  ← 10-K / IR 直接披露
+Foundry 70% 份额 [B]  ← Wikipedia 引用 TrendForce
+```
+
+### 10.5 看板底部"质量摘要"模板
+
+```
+════════ DATA QUALITY ════════
+A 占比: ~XX%   <填实际>
+B 占比: ~XX%   <填实际>
+C 占比: ~XX%   <填实际>
+D 占比: ~XX%   <填实际>
+═══════════════════════════════
+总评: <B+ / A- / C+ 等>
+下次高 ROI 提升方向: <拉 10-K / 拉 earnings call / 拉 Reuters>
+```
+
+### 10.6 3 个高 ROI 补充(下次分析必做)
+
+| 优先级 | 数据源 | 补什么 | 当前 TSM 缺什么 |
+|---|---|---|---|
+| 1 必补 | **Earnings call transcript** (7/16 后) | 管理层原话 + Q&A | forward guidance 数字 + capex 节奏全靠"行业共识"反推 |
+| 2 必补 | **10-K / 20-F primary** (SEC EDGAR) | 风险因素段 + 客户披露 | "Apple 22%" 客户占比是估的,10-K 有实际披露 |
+| 3 推荐 | **Reuters 近 30 天新闻** | 地缘政治 / Apple iPhone cycle | TSMC 90% 估值受地缘影响,实时新闻不可缺 |
+
+### 10.7 不补的(噪音大)
+
+- ❌ Seeking Alpha 散户文章(信噪比低)
+- ❌ 卖方研报(Bernstein / MS,要付费且和 consensus 重复)
+- ❌ 推特 / Reddit 情绪(对机构盘意义小)
+
+### 10.8 现有看板的 retrofit 决策
+
+- SPCX / RKLB / LITE / GLW / TSM 5 个看板:不 retrofit(用户明确表示不改)
+- 下次新公司分析:从一开始就用 v2(5 链 priority + ABCD 标签 + 质量摘要)
+- 跟 DSA 项目的关系:本规则不直接影响 DSA 部署,但是做"公司基本面分析"的统一流程,跟 DSA 项目的"A股/美股分析"业务直接相关
+
