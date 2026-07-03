@@ -66,7 +66,9 @@ services:
   server:
     <<: *common
     container_name: stock-server
-    command: "python main.py --serve-only --host 0.0.0.0 --port ${API_PORT:-8000}"
-    # 若使用 network_mode: host，则以下 ports 映射无效，端口由 command 中的 --port 指定
-    ports:
-      - "${API_PORT:-8000}:${API_PORT:-8000}"
+    # Moomoo OpenD 通过 SSH 反向隧道从 macOS 暴露到 127.0.0.1:11111。
+    # SSH 仅监听 host loopback；用 host 网络让容器共享 loopback，避免
+    # docker bridge 隔离。analyzer 不需要 OpenD，保持 bridge 网络。
+    network_mode: host
+    command: "python main.py --serve-only --host 0.0.0.0 --port ${API_PORT:-8088}"
+    # network_mode: host 下 ports 映射无效；容器直接绑定 0.0.0.0:8088
