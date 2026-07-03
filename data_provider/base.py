@@ -15,6 +15,7 @@
 """
 
 import logging
+import os
 import random
 import time
 from threading import BoundedSemaphore, RLock, Thread
@@ -623,6 +624,7 @@ class DataFetcherManager:
         "LongbridgeFetcher": {"hk", "us"},
         "FinnhubFetcher": {"us"},
         "AlphaVantageFetcher": {"us"},
+        "MoomooFetcher": {"us", "hk", "cn"},
     }
     _daily_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
     _CONCEPT_RANKINGS_CACHE_TTL_SECONDS = 300.0
@@ -1194,6 +1196,33 @@ class DataFetcherManager:
             optional_fetchers.append(LongbridgeFetcher())  # 长桥（美股/港股兜底，懒加载）
         else:
             logger.debug("[数据源初始化] 跳过未配置的 LongbridgeFetcher")
+
+        # Moomoo OpenD 通过 SSH 反向隧道 (127.0.0.1:11111) 暴露
+        # 仅在 MOOMOO_ENABLED=true 且 futu-api 已安装时启用
+        moomoo_enabled_env = (os.getenv("MOOMOO_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"})
+        futu_installed = False
+        if moomoo_enabled_env:
+            try:
+                import futu  # noqa: F401
+                futu_installed = True
+            except Exception:
+                logger.debug("[数据源初始化] MOOMOO_ENABLED=true 但 futu-api 未安装，跳过 MoomooFetcher")
+        if moomoo_enabled_env and futu_installed:
+            try:
+                from .moomoo_fetcher import MoomooFetcher
+                moomoo = MoomooFetcher()
+                if moomoo.is_available_for_request():
+                    optional_fetchers.append(moomoo)
+                    logger.info("[数据源初始化] MoomooFetcher 已启用 (P%d)", moomoo.priority)
+                else:
+                    logger.warning(
+                        "[数据源初始化] MoomooFetcher 健康检查未通过 (%s)，跳过",
+                        moomoo.disabled_reason,
+                    )
+            except Exception as exc:
+                logger.warning("[数据源初始化] MoomooFetcher 初始化失败: %s", exc)
+        elif moomoo_enabled_env:
+            logger.debug("[数据源初始化] 跳过未安装 futu-api 的 MoomooFetcher")
 
         finnhub_api_key = (getattr(config, "finnhub_api_key", None) or "").strip()
         if finnhub_api_key:

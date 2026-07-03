@@ -22,6 +22,8 @@ longbridge==0.2.74; platform_system == "Linux" and python_version < "3.12"
 # Priority 5: Longbridge OpenAPI SDK with OAuth support.
 longbridge>=4.0.5,<5; platform_system != "Linux" or python_version >= "3.12"
 tickflow>=0.1.24           # TickFlow official SDK; 0.1.24 verified for klines/get batch quotes/universes
+# Moomoo / Futu OpenD quote API (used by MoomooFetcher via SSH reverse tunnel to 127.0.0.1:11111)
+futu-api>=10.8.0            # Moomoo OpenD quote SDK; manylinux2014 wheel available for cp311
 # Built-in optional AlphaSift screening engine
 git+https://github.com/ZhuLinsen/alphasift.git@0a7b9cd59e81718f851890535241bc105d4ddc64#egg=alphasift
 
