@@ -1968,7 +1968,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         if not rows:
             return 0
         now = datetime.now()
-        with self.get_session() as session:
+        session = self.get_session()
+        try:
             for news_id, sentiment, confidence, reason in rows:
                 session.execute(
                     update(NewsIntel)
@@ -1981,6 +1982,12 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                         sentiment_classified_at=now,
                     )
                 )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
         return len(rows)
 
     def save_analysis_history(
