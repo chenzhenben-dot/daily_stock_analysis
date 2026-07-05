@@ -4354,6 +4354,8 @@ class GeminiAnalyzer:
         """Extract the single allowed JSON object from an LLM response."""
 
         text = response_text or ""
+        # 剥掉 MiniMax-M3 等 reasoning model 的 <think>...</think> 段
+        text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
         stripped = text.strip()
         if not stripped:
             raise ValueError("empty_response")
