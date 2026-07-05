@@ -136,23 +136,39 @@ def save_state(is_up: bool, fail_count: int) -> None:
         logging.warning("save_state failed: %s", exc)
 
 
-def send_email(subject: str, body: str) -> bool:
-    try:
-        if DSA_APP_DIR not in sys.path:
-            sys.path.insert(0, DSA_APP_DIR)
-        from src.notification import get_notification_service
-        svc = get_notification_service()
-        ok = svc.send_to_email(content=body, subject=subject, receivers=[SMTP_RECEIVER])
-        if ok:
-            logging.info("email sent: %s", subject)
-        else:
-            logging.error("email send returned False: %s", subject)
-        return ok
-    except Exception as exc:
-        logging.error("send_email exception: %s", exc)
-        logging.debug(traceback.format_exc())
+def send_telegram(subject: str, body: str) -> bool:
+    """Send notification via Telegram bot. Replaces legacy email notification."""
+    import requests
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not bot_token or not chat_id:
+        logging.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
         return False
-
+    full_text = f"<b>{subject}</b>\\n\\n{body}"
+    # Telegram single-message limit is 4096 chars; truncate safely.
+    if len(full_text) > 4000:
+        full_text = full_text[:3950] + "\\n\\n... (truncated)"
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": full_text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            logging.info("telegram sent: %s", subject)
+            return True
+        else:
+            logging.error("telegram send failed: %s", data)
+            return False
+    except Exception as exc:
+        logging.error("telegram send exception: %s", exc)
+        return False
 
 def _body_down(failed_items, details):
     details_block = "\n".join("  - " + d for d in details)
@@ -175,7 +191,7 @@ def _body_down(failed_items, details):
         "3. Restart tunnel: launchctl kickstart -k gui/$(id -u)/com.dsa.moomoo-tunnel\n"
         "4. Verify: ssh root@server \"ss -tln | grep " + str(PORT_NUM) + "\"\n"
         "\n"
-        "(automated email from /opt/dsa/scripts/moomoo_watchdog.py)\n"
+        "(automated Telegram message from /opt/dsa/scripts/moomoo_watchdog.py)\n"
     )
 
 
@@ -189,7 +205,7 @@ def _body_up():
         "\n"
         "DSA capital distribution / capital flow back to normal.\n"
         "\n"
-        "(automated email from /opt/dsa/scripts/moomoo_watchdog.py)\n"
+        "(automated Telegram message from /opt/dsa/scripts/moomoo_watchdog.py)\n"
     )
 
 
@@ -261,7 +277,7 @@ def main() -> int:
                 details.append("snapshot: " + login_detail)
             subject = "[DSA] moomoo OpenD 通道断开"
             body = _body_down(failed, details)
-        send_email(subject, body)
+        send_telegram(subject, body)
         logging.info("alert sent: state -> %s", "up" if is_up else "down")
     else:
         logging.info(

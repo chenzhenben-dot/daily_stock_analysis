@@ -684,6 +684,75 @@ class DataFetcherManager:
         with self._fetchers_lock:
             return list(getattr(self, "_fetchers", []))
 
+
+    def _parallel_try_fetchers(
+        self,
+        method_name: str,
+        *,
+        max_workers: int = 4,
+        overall_timeout: float = 30.0,
+        purpose: str = "",
+    ) -> Any:
+        """B1+B2: run multiple fetchers in parallel, return first non-empty result.
+
+        Race condition guarded by futures.cancel(); on timeout or all-empty return None.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        candidates = [f for f in self._get_fetchers_snapshot() if hasattr(f, method_name)]
+        # TickFlowFetcher has its own path; skip here
+        candidates = [f for f in candidates if f.name != "TickFlowFetcher"]
+        if not candidates:
+            return None
+
+        start = time.monotonic()
+
+        def call_one(fetcher):
+            try:
+                t0 = time.monotonic()
+                result = getattr(fetcher, method_name)()
+                elapsed = time.monotonic() - t0
+                if result:
+                    logger.info(
+                        "[ParallelFetchers] purpose=%s method=%s provider=%s success elapsed=%.2fs",
+                        purpose, method_name, fetcher.name, elapsed,
+                    )
+                    return result
+                logger.info(
+                    "[ParallelFetchers] purpose=%s method=%s provider=%s empty elapsed=%.2fs",
+                    purpose, method_name, fetcher.name, elapsed,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[ParallelFetchers] purpose=%s method=%s provider=%s error=%s",
+                    purpose, method_name, fetcher.name, exc,
+                )
+            return None
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(candidates))) as executor:
+            futures = {executor.submit(call_one, f): f for f in candidates}
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    result = future.result()
+                    if result:
+                        for f in futures:
+                            f.cancel()
+                        total_elapsed = time.monotonic() - start
+                        logger.info(
+                            "[ParallelFetchers] purpose=%s method=%s found in %.2fs (cancelled %d remaining)",
+                            purpose, method_name, total_elapsed, len(futures) - 1,
+                        )
+                        return result
+            except Exception:
+                pass
+
+        total_elapsed = time.monotonic() - start
+        logger.info(
+            "[ParallelFetchers] purpose=%s method=%s all empty/failed/timeout in %.2fs, returning None",
+            purpose, method_name, total_elapsed,
+        )
+        return None
+
     def _refresh_fetcher_indexes_locked(self) -> None:
         self._fetchers_by_name = {fetcher.name: fetcher for fetcher in self._fetchers}
 
@@ -2543,40 +2612,15 @@ class DataFetcherManager:
                     e,
                 )
 
-        for fetcher in self._fetchers:
-            if fetcher.name == "TickFlowFetcher":
-                continue
-            started_at = time.monotonic()
-            try:
-                data = fetcher.get_market_stats()
-                elapsed = time.monotonic() - started_at
-                if data:
-                    logger.info(
-                        "[MarketStats] component=market_stats action=provider_success "
-                        "purpose=%s provider=%s elapsed=%.2fs",
-                        purpose,
-                        fetcher.name,
-                        elapsed,
-                    )
-                    return data
-                logger.info(
-                    "[MarketStats] component=market_stats action=provider_empty "
-                    "purpose=%s provider=%s elapsed=%.2fs",
-                    purpose,
-                    fetcher.name,
-                    elapsed,
-                )
-            except Exception as e:
-                elapsed = time.monotonic() - started_at
-                logger.warning(
-                    "[MarketStats] component=market_stats action=provider_failed "
-                    "purpose=%s provider=%s elapsed=%.2fs error=%s",
-                    purpose,
-                    fetcher.name,
-                    elapsed,
-                    e,
-                )
-                continue
+        # B1+B2: parallel-fanout across all non-TickFlow fetchers, first success wins
+        data = self._parallel_try_fetchers(
+            "get_market_stats",
+            max_workers=4,
+            overall_timeout=30.0,
+            purpose=purpose,
+        )
+        if data:
+            return data
         logger.warning("[MarketStats] component=market_stats action=complete status=empty purpose=%s", purpose)
         return {}
 
