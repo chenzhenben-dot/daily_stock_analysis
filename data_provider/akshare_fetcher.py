@@ -34,6 +34,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 import pandas as pd
 import requests
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -1749,6 +1750,29 @@ class AkshareFetcher(BaseFetcher):
             logger.error(f"[Akshare] 获取指数行情失败: {e}")
             return None
 
+    # Hard cap per ak.* call (seconds). akshare internally does blocking
+    # requests with retries that hang for 90s+ when this server (geographic
+    # instability to eastmoney / sina CDN) is throttled. signal.alarm does
+    # not work in worker threads, so we run each call in a short-lived
+    # ThreadPoolExecutor and bound the wait via future.result(timeout=...).
+    _AK_MARKET_STATS_TIMEOUT = 12.0
+
+    @staticmethod
+    def _run_with_executor_timeout(callable_, timeout_seconds):
+        """Run callable_ in a daemon thread; future.result(timeout=...) bounds wait."""
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ak-ms")
+        future = executor.submit(callable_)
+        try:
+            try:
+                return future.result(timeout=timeout_seconds), None
+            except FuturesTimeoutError:
+                future.cancel()
+                return None, "timeout_after_{:.0f}s".format(timeout_seconds)
+            except Exception as exc:  # noqa: BLE001
+                return None, str(exc)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
     def get_market_stats(self) -> Optional[Dict[str, Any]]:
         """
         获取市场涨跌统计
@@ -1756,66 +1780,109 @@ class AkshareFetcher(BaseFetcher):
         数据源优先级：
         1. 东财接口 (ak.stock_zh_a_spot_em)
         2. 新浪接口 (ak.stock_zh_a_spot)
+
+        Each ak.* call is bounded by _AK_MARKET_STATS_TIMEOUT (12s) so a hung
+        upstream cannot stall the parallel-fanout beyond that. We also skip
+        the random 2-5s sleep inside _enforce_rate_limit() here because two
+        serial sleeps plus a hung ak.* call previously summed to 91.6s.
         """
         import akshare as ak
 
+        timeout_s = self._AK_MARKET_STATS_TIMEOUT
+
         # 优先东财接口
         try:
-            self._set_random_user_agent()
-            self._enforce_rate_limit()
-
             started_at = time.monotonic()
             logger.info(
                 "[MarketStats] component=market_stats provider=AkshareFetcher "
-                "api=ak.stock_zh_a_spot_em action=request_start"
+                "api=ak.stock_zh_a_spot_em action=request_start timeout=%.1fs",
+                timeout_s,
             )
-            df = ak.stock_zh_a_spot_em()
+
+            def _call_em():
+                self._set_random_user_agent()
+                return ak.stock_zh_a_spot_em()
+
+            df, err = self._run_with_executor_timeout(_call_em, timeout_s)
             elapsed = time.monotonic() - started_at
-            logger.info(
-                "[MarketStats] component=market_stats provider=AkshareFetcher "
-                "api=ak.stock_zh_a_spot_em action=request_complete elapsed=%.2fs",
-                elapsed,
-            )
-            if df is not None and not df.empty:
-                return self._calc_market_stats(df)
-            logger.warning(
-                "[MarketStats] component=market_stats provider=AkshareFetcher "
-                "api=ak.stock_zh_a_spot_em action=parse status=empty"
-            )
+            if err and err.startswith("timeout_after_"):
+                logger.warning(
+                    "[MarketStats] component=market_stats provider=AkshareFetcher "
+                    "api=ak.stock_zh_a_spot_em action=timeout elapsed=%.2fs "
+                    "fallback=ak.stock_zh_a_spot",
+                    elapsed,
+                )
+            elif err is not None:
+                logger.warning(
+                    "[MarketStats] component=market_stats provider=AkshareFetcher "
+                    "api=ak.stock_zh_a_spot_em action=failed elapsed=%.2fs error=%s "
+                    "fallback=ak.stock_zh_a_spot",
+                    elapsed,
+                    err,
+                )
+            else:
+                logger.info(
+                    "[MarketStats] component=market_stats provider=AkshareFetcher "
+                    "api=ak.stock_zh_a_spot_em action=request_complete elapsed=%.2fs",
+                    elapsed,
+                )
+                if df is not None and not df.empty:
+                    return self._calc_market_stats(df)
+                logger.warning(
+                    "[MarketStats] component=market_stats provider=AkshareFetcher "
+                    "api=ak.stock_zh_a_spot_em action=parse status=empty"
+                )
         except Exception as e:
             logger.warning(
                 "[MarketStats] component=market_stats provider=AkshareFetcher "
-                "api=ak.stock_zh_a_spot_em action=failed error=%s fallback=ak.stock_zh_a_spot",
+                "api=ak.stock_zh_a_spot_em action=failed_outer error=%s fallback=ak.stock_zh_a_spot",
                 e,
             )
 
         # 东财失败后，尝试新浪接口
         try:
-            self._set_random_user_agent()
-            self._enforce_rate_limit()
-
             started_at = time.monotonic()
             logger.info(
                 "[MarketStats] component=market_stats provider=AkshareFetcher "
-                "api=ak.stock_zh_a_spot action=request_start"
+                "api=ak.stock_zh_a_spot action=request_start timeout=%.1fs",
+                timeout_s,
             )
-            df = ak.stock_zh_a_spot()
+
+            def _call_sina():
+                self._set_random_user_agent()
+                return ak.stock_zh_a_spot()
+
+            df, err = self._run_with_executor_timeout(_call_sina, timeout_s)
             elapsed = time.monotonic() - started_at
-            logger.info(
-                "[MarketStats] component=market_stats provider=AkshareFetcher "
-                "api=ak.stock_zh_a_spot action=request_complete elapsed=%.2fs",
-                elapsed,
-            )
-            if df is not None and not df.empty:
-                return self._calc_market_stats(df)
-            logger.warning(
-                "[MarketStats] component=market_stats provider=AkshareFetcher "
-                "api=ak.stock_zh_a_spot action=parse status=empty"
-            )
+            if err and err.startswith("timeout_after_"):
+                logger.warning(
+                    "[MarketStats] component=market_stats provider=AkshareFetcher "
+                    "api=ak.stock_zh_a_spot action=timeout elapsed=%.2fs",
+                    elapsed,
+                )
+            elif err is not None:
+                logger.error(
+                    "[MarketStats] component=market_stats provider=AkshareFetcher "
+                    "api=ak.stock_zh_a_spot action=failed elapsed=%.2fs error=%s",
+                    elapsed,
+                    err,
+                )
+            else:
+                logger.info(
+                    "[MarketStats] component=market_stats provider=AkshareFetcher "
+                    "api=ak.stock_zh_a_spot action=request_complete elapsed=%.2fs",
+                    elapsed,
+                )
+                if df is not None and not df.empty:
+                    return self._calc_market_stats(df)
+                logger.warning(
+                    "[MarketStats] component=market_stats provider=AkshareFetcher "
+                    "api=ak.stock_zh_a_spot action=parse status=empty"
+                )
         except Exception as e:
             logger.error(
                 "[MarketStats] component=market_stats provider=AkshareFetcher "
-                "api=ak.stock_zh_a_spot action=failed error=%s",
+                "api=ak.stock_zh_a_spot action=failed_outer error=%s",
                 e,
             )
 
