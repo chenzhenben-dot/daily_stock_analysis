@@ -490,7 +490,7 @@ const HomePage: React.FC = () => {
     async (taskId: string) => {
       stopMarketReviewPolling();
 
-      const maxAttempts = 120;
+      const maxAttempts = 240;
       const intervalMs = 2000;
       let attempts = 0;
 
