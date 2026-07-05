@@ -161,8 +161,24 @@ class MoomooFetcher(BaseFetcher):
     # --- DSA fetcher plumbing ---
 
     def is_available_for_request(self, capability: str = "") -> bool:
-        """Used by DataFetcherManager to skip this fetcher at runtime."""
-        return self._disabled_reason is None
+        """Used by DataFetcherManager to skip this fetcher at runtime.
+
+        Non-blocking TCP probe to OpenD (3s timeout) to avoid the
+        OpenQuoteContext() constructor, which can hang 30+ minutes when
+        the SSH tunnel to the macOS moomoo bridge is down.
+        """
+        if self._disabled_reason is not None:
+            return False
+        import socket
+        try:
+            with socket.create_connection((self._host, self._port), timeout=3):
+                return True
+        except (socket.timeout, ConnectionRefusedError, OSError) as exc:
+            logger.debug(
+                "[MoomooFetcher] is_available_for_request socket check failed: %s",
+                exc,
+            )
+            return False
 
     @property
     def enabled(self) -> bool:
@@ -181,6 +197,19 @@ class MoomooFetcher(BaseFetcher):
                 return self._ctx
             if self._disabled_reason is not None:
                 raise DataFetchError(f"[Moomoo] {self._disabled_reason}")
+            # Socket pre-check (3s) to fail fast when the SSH tunnel is down,
+            # instead of letting OpenQuoteContext() block for 30-60s.
+            import socket
+            try:
+                with socket.create_connection((self._host, self._port), timeout=3):
+                    pass
+            except (socket.timeout, ConnectionRefusedError, OSError) as exc:
+                logger.warning(
+                    "[MoomooFetcher] _ensure_ctx socket pre-check failed: %s", exc
+                )
+                raise ConnectionError(
+                    f"OpenD at {self._host}:{self._port} not reachable"
+                ) from exc
             logger.info(
                 "[MoomooFetcher] connecting to OpenD at %s:%d", self._host, self._port
             )
