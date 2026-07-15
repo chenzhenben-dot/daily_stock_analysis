@@ -18,6 +18,7 @@ import logging
 import os
 import random
 import time
+from copy import deepcopy
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -30,6 +31,8 @@ from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
 from src.services.market_symbol_utils import is_suffix_market_symbol
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 from .fundamental_adapter import AkshareFundamentalAdapter
+from .fmp_fundamental_adapter import FmpFundamentalAdapter
+from .sec_edgar_fundamental_adapter import SecEdgarFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 from .realtime_types import CircuitBreaker
 
@@ -414,6 +417,14 @@ class BaseFetcher(ABC):
         """
         return None
 
+    def get_us_sector_rankings(
+        self,
+        n: int = 5,
+        language: str = "zh",
+    ) -> Optional[Tuple[List[Dict], List[Dict]]]:
+        """获取美股行业板块涨跌榜；默认数据源不支持。"""
+        return None
+
     def get_concept_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
         """
         获取概念/题材涨跌榜。
@@ -656,6 +667,8 @@ class DataFetcherManager:
             # 默认数据源将在首次使用时延迟加载
             self._init_default_fetchers()
         self._fundamental_adapter = AkshareFundamentalAdapter()
+        self._fmp_fundamental_adapter = FmpFundamentalAdapter()
+        self._sec_edgar_fundamental_adapter = SecEdgarFundamentalAdapter()
         self._yfinance_fundamental_adapter = YfinanceFundamentalAdapter()
         self._tickflow_fetcher = None
         self._tickflow_api_key: Optional[str] = None
@@ -2891,6 +2904,118 @@ class DataFetcherManager:
             **blocks,
         }
 
+    @staticmethod
+    def _merge_offshore_fundamental_bundles(
+        yfinance_bundle: Any,
+        sec_bundle: Any,
+        fmp_bundle: Any = None,
+    ) -> Dict[str, Any]:
+        """Prefer SEC statements and add FMP metrics while retaining YFinance fields."""
+        yfinance_bundle = yfinance_bundle if isinstance(yfinance_bundle, dict) else {}
+        sec_bundle = sec_bundle if isinstance(sec_bundle, dict) else {}
+        fmp_bundle = fmp_bundle if isinstance(fmp_bundle, dict) else {}
+        merged = deepcopy(yfinance_bundle) if yfinance_bundle else {
+            "status": "not_supported",
+            "growth": {},
+            "earnings": {},
+            "belong_boards": [],
+            "source_chain": [],
+            "errors": [],
+        }
+
+        growth = merged.get("growth") if isinstance(merged.get("growth"), dict) else {}
+        sec_growth = sec_bundle.get("growth") if isinstance(sec_bundle.get("growth"), dict) else {}
+        growth.update({key: value for key, value in sec_growth.items() if value is not None})
+        merged["growth"] = growth
+
+        earnings = merged.get("earnings") if isinstance(merged.get("earnings"), dict) else {}
+        sec_earnings = sec_bundle.get("earnings") if isinstance(sec_bundle.get("earnings"), dict) else {}
+        if isinstance(sec_earnings.get("financial_report"), dict) and sec_earnings["financial_report"]:
+            earnings["financial_report"] = deepcopy(sec_earnings["financial_report"])
+        if isinstance(sec_earnings.get("sec_filings"), list) and sec_earnings["sec_filings"]:
+            earnings["sec_filings"] = deepcopy(sec_earnings["sec_filings"])
+        fmp_earnings = fmp_bundle.get("earnings") if isinstance(fmp_bundle.get("earnings"), dict) else {}
+        for key in ("valuation_metrics", "quality_metrics", "financial_health"):
+            if isinstance(fmp_earnings.get(key), dict) and fmp_earnings[key]:
+                earnings[key] = deepcopy(fmp_earnings[key])
+        merged["earnings"] = earnings
+
+        boards = list(merged.get("belong_boards") or [])
+        seen_boards = {str(item.get("name")) for item in boards if isinstance(item, dict) and item.get("name")}
+        for item in fmp_bundle.get("belong_boards") or []:
+            if not isinstance(item, dict) or not item.get("name") or str(item["name"]) in seen_boards:
+                continue
+            boards.append(deepcopy(item))
+            seen_boards.add(str(item["name"]))
+        merged["belong_boards"] = boards
+        if isinstance(fmp_bundle.get("company_profile"), dict) and fmp_bundle["company_profile"]:
+            merged["company_profile"] = deepcopy(fmp_bundle["company_profile"])
+
+        merged["source_chain"] = (
+            list(yfinance_bundle.get("source_chain") or [])
+            + list(sec_bundle.get("source_chain") or [])
+            + list(fmp_bundle.get("source_chain") or [])
+        )
+        merged["errors"] = (
+            list(yfinance_bundle.get("errors") or [])
+            + list(sec_bundle.get("errors") or [])
+            + list(fmp_bundle.get("errors") or [])
+        )
+        providers = []
+        if sec_bundle.get("status") in {"ok", "partial"}:
+            providers.append("sec_edgar")
+        if yfinance_bundle.get("status") in {"ok", "partial"} or yfinance_bundle.get("source_chain"):
+            providers.append("yfinance")
+        if fmp_bundle.get("status") in {"ok", "partial"}:
+            providers.append("fmp")
+        merged["provider"] = "+".join(providers or ["yfinance"])
+        if growth or earnings or merged.get("belong_boards"):
+            merged["status"] = "partial"
+        return merged
+
+    def _fetch_offshore_fundamental_bundle(
+        self,
+        stock_code: str,
+        *,
+        include_sec: bool,
+        timeout_seconds: float,
+    ) -> Dict[str, Any]:
+        """Fetch independent offshore sources concurrently within one stage budget."""
+        from concurrent.futures import ThreadPoolExecutor, wait
+
+        include_fmp = bool(
+            include_sec
+            and getattr(getattr(self, "_fmp_fundamental_adapter", None), "is_configured", False)
+        )
+        executor = ThreadPoolExecutor(max_workers=1 + int(include_sec) + int(include_fmp))
+        futures = {
+            "yfinance": executor.submit(self._yfinance_fundamental_adapter.get_fundamental_bundle, stock_code),
+        }
+        if include_sec:
+            futures["sec"] = executor.submit(self._sec_edgar_fundamental_adapter.get_fundamental_bundle, stock_code)
+        if include_fmp:
+            futures["fmp"] = executor.submit(self._fmp_fundamental_adapter.get_fundamental_bundle, stock_code)
+        try:
+            done, pending = wait(futures.values(), timeout=max(0.1, timeout_seconds))
+            for future in pending:
+                future.cancel()
+            payloads: Dict[str, Any] = {}
+            for name, future in futures.items():
+                if future not in done:
+                    payloads[name] = {"status": "not_supported", "errors": [f"{name}:timeout"]}
+                    continue
+                try:
+                    payloads[name] = future.result()
+                except Exception as exc:
+                    payloads[name] = {"status": "not_supported", "errors": [f"{name}:{type(exc).__name__}:{exc}"]}
+            return self._merge_offshore_fundamental_bundles(
+                payloads.get("yfinance"),
+                payloads.get("sec"),
+                payloads.get("fmp"),
+            )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
     def _build_offshore_fundamental_context(
         self,
         stock_code: str,
@@ -2930,7 +3055,7 @@ class DataFetcherManager:
 
         result_ctx: Dict[str, Any] = {
             "market": market,
-            "provider": "yfinance",
+            "provider": "sec_edgar+yfinance" if market == "us" else "yfinance",
             "as_of": datetime.now(timezone.utc).isoformat(),
             "data_quality": "unavailable",
             "missing_fields": [],
@@ -2983,22 +3108,26 @@ class DataFetcherManager:
             [valuation_err] if valuation_err else [],
         )
 
-        # Fundamental bundle via yfinance.
+        # Fundamental bundle: SEC and YFinance run concurrently for US stocks.
         bundle_timeout = min(fetch_timeout, max(stage_timeout - (time.time() - start_ts), 0.0))
         if bundle_timeout <= 0:
             bundle_payload, bundle_err, bundle_ms = {}, "fundamental stage timeout", 0
         else:
             bundle_payload, bundle_err, bundle_ms = self._run_with_retry(
-                lambda: self._yfinance_fundamental_adapter.get_fundamental_bundle(stock_code),
+                lambda: self._fetch_offshore_fundamental_bundle(
+                    stock_code,
+                    include_sec=market == "us",
+                    timeout_seconds=bundle_timeout,
+                ),
                 bundle_timeout,
-                "fundamental_bundle_yfinance",
+                "fundamental_bundle_offshore",
             )
         if not isinstance(bundle_payload, dict):
             bundle_payload = {}
 
         bundle_chain = self._normalize_source_chain(
             bundle_payload.get("source_chain", []),
-            "fundamental_bundle_yfinance",
+            "fundamental_bundle_offshore",
             str(bundle_payload.get("status", "not_supported")),
             bundle_ms,
         )
@@ -3009,6 +3138,26 @@ class DataFetcherManager:
         growth_payload = bundle_payload.get("growth", {}) if isinstance(bundle_payload.get("growth"), dict) else {}
         earnings_payload = bundle_payload.get("earnings", {}) if isinstance(bundle_payload.get("earnings"), dict) else {}
         belong_boards = bundle_payload.get("belong_boards") if isinstance(bundle_payload.get("belong_boards"), list) else []
+
+        fmp_valuation = earnings_payload.get("valuation_metrics") if isinstance(earnings_payload.get("valuation_metrics"), dict) else {}
+        if fmp_valuation:
+            valuation_data = result_ctx["valuation"].get("data", {})
+            valuation_data = dict(valuation_data) if isinstance(valuation_data, dict) else {}
+            valuation_data.update({key: value for key, value in fmp_valuation.items() if value is not None})
+            if valuation_data.get("pe_ratio") is None and fmp_valuation.get("pe_ratio_ttm") is not None:
+                valuation_data["pe_ratio"] = fmp_valuation["pe_ratio_ttm"]
+            if valuation_data.get("pb_ratio") is None and fmp_valuation.get("pb_ratio_ttm") is not None:
+                valuation_data["pb_ratio"] = fmp_valuation["pb_ratio_ttm"]
+            if valuation_data.get("total_mv") is None and fmp_valuation.get("market_cap") is not None:
+                valuation_data["total_mv"] = fmp_valuation["market_cap"]
+            result_ctx["valuation"]["data"] = valuation_data
+            result_ctx["valuation"]["status"] = self._infer_block_status(valuation_data, valuation_status)
+            result_ctx["valuation"]["source_chain"].append(
+                {"provider": "fmp", "result": "partial", "duration_ms": bundle_ms}
+            )
+            valuation_status = result_ctx["valuation"]["status"]
+
+        result_ctx["provider"] = str(bundle_payload.get("provider") or result_ctx["provider"])
 
         growth_status = self._infer_block_status(growth_payload, str(bundle_payload.get("status", "not_supported")))
         earnings_status = self._infer_block_status(earnings_payload, str(bundle_payload.get("status", "not_supported")))
@@ -3660,6 +3809,8 @@ class DataFetcherManager:
     def _get_sector_rankings_with_meta(
             self,
             n: int = 5,
+            region: str = "cn",
+            language: str = "zh",
         ) -> Tuple[List[Dict], List[Dict], List[Dict[str, Any]], str]:
             """Get sector rankings with ordered fallback chain metadata."""
             source_chain: List[Dict[str, Any]] = []
@@ -3667,12 +3818,14 @@ class DataFetcherManager:
 
             # 直接遍历管理器已经按 priority 排好序的数据源列表
             for fetcher in self._fetchers:
-                if not hasattr(fetcher, 'get_sector_rankings'):
+                method_name = "get_us_sector_rankings" if region == "us" else "get_sector_rankings"
+                if not hasattr(fetcher, method_name):
                     continue
 
                 start = time.time()
                 try:
-                    data = fetcher.get_sector_rankings(n)
+                    method = getattr(fetcher, method_name)
+                    data = method(n, language=language) if region == "us" else method(n)
                     duration_ms = int((time.time() - start) * 1000)
                     if data and data[0] is not None and data[1] is not None:
                         source_chain.append(
@@ -3710,10 +3863,20 @@ class DataFetcherManager:
 
             return [], [], source_chain, last_error
 
-    def get_sector_rankings(self, n: int = 5) -> Tuple[List[Dict], List[Dict]]:
+    def get_sector_rankings(
+        self,
+        n: int = 5,
+        *,
+        region: str = "cn",
+        language: str = "zh",
+    ) -> Tuple[List[Dict], List[Dict]]:
         """获取板块涨跌榜（自动切换数据源）"""
         # 按需求固定回退顺序：Akshare(EM) -> Akshare(Sina) -> Tushare -> Efinance
-        top, bottom, _, last_error = self._get_sector_rankings_with_meta(n)
+        top, bottom, _, last_error = self._get_sector_rankings_with_meta(
+            n,
+            region=region,
+            language=language,
+        )
         if top or bottom:
             return top, bottom
         logger.warning(f"[板块排行] 所有数据源均失败，最终错误: {last_error}")

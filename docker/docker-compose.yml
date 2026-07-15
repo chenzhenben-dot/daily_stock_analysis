@@ -29,8 +29,6 @@ x-common: &common
     # Longbridge OAuth token cache persistence; entrypoint repairs container-side ownership for dsa user.
     # Create ../longbridge_tokens on the host before copying an authorized token cache into it.
     - ../longbridge_tokens:/home/dsa/.longbridge
-    # 如需覆盖前端静态资源，可挂载本地 static 目录
-    # - ../static:/app/static:ro
 
   environment:
     - TZ=Asia/Shanghai
@@ -52,7 +50,7 @@ x-common: &common
   deploy:
     resources:
       limits:
-        memory: 1G
+        memory: 2G
       reservations:
         memory: 512M
 
@@ -72,3 +70,11 @@ services:
     network_mode: host
     command: "python main.py --serve-only --host 0.0.0.0 --port ${API_PORT:-8088}"
     # network_mode: host 下 ports 映射无效；容器直接绑定 0.0.0.0:8088
+
+  # Telegram 长轮询：接收“分析一下 GRAB”等消息并提交 DSA 分析。
+  telegram-bot:
+    <<: *common
+    image: daily-stock-analysis-server
+    container_name: dsa-telegram-bot
+    network_mode: host
+    command: "python bot/telegram_polling.py"

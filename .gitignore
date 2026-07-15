@@ -88,3 +88,14 @@ static/
 /apps/dsa-desktop/dist/
 /apps/dsa-desktop/node_modules/
 docs/specs/
+
+# Server runtime artifacts and deployment backups
+._*
+**/._*
+*.bak-*
+*.bak.*
+/backups/
+/static.bak-*/
+/searxng-data/
+/watch_telegram_bot.sh
+/docker/*.codex-*

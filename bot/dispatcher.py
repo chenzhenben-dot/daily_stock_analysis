@@ -297,6 +297,9 @@ class CommandDispatcher:
             return early_response
 
         if cmd_name is None:
+            direct_result = self._try_direct_analysis_routing_sync(message)
+            if direct_result is not None:
+                return direct_result
             nl_result = self._try_nl_routing_sync(message)
             if nl_result is not None:
                 return nl_result
@@ -335,6 +338,9 @@ class CommandDispatcher:
 
         if cmd_name is None:
             # Not a command — try natural language routing before falling back
+            direct_result = await self._try_direct_analysis_routing(message)
+            if direct_result is not None:
+                return direct_result
             nl_result = await self._try_nl_routing(message)
             if nl_result is not None:
                 return nl_result
@@ -374,6 +380,58 @@ class CommandDispatcher:
     # ------------------------------------------------------------------ #
     #  Natural language routing (LLM-based)                              #
     # ------------------------------------------------------------------ #
+
+    _DIRECT_ANALYSIS_PHRASE = re.compile(
+        r'(?:帮我|帮忙|麻烦|请|我想)?\s*(?:分析|研究|诊断|看看|看一下|查一下|check|analy[sz]e)\s*(?:一下|下)?',
+        re.IGNORECASE,
+    )
+    _DIRECT_ANALYSIS_CODE = re.compile(
+        r'\b(?:[036]\d{5}|(?:43|83|87|88|92)\d{4}|(?:HK|hk)\d{5}|[A-Z]{1,5}(?:\.[A-Z]{1,2})?)\b'
+    )
+
+    @classmethod
+    def _extract_direct_analysis_code(cls, text: str) -> Optional[str]:
+        """Extract a ticker from simple human phrasing without paying LLM cost."""
+        if not text or not cls._DIRECT_ANALYSIS_PHRASE.search(text):
+            return None
+        match = cls._DIRECT_ANALYSIS_CODE.search(text)
+        if not match:
+            return None
+        return match.group(0).upper()
+
+    async def _try_direct_analysis_routing(self, message: BotMessage) -> Optional[BotResponse]:
+        is_private = message.chat_type.value == "private"
+        if not is_private and not message.mentioned:
+            return None
+        code = self._extract_direct_analysis_code(message.content.strip())
+        if not code:
+            return None
+        analyze_cmd = self.get_command("analyze")
+        if not analyze_cmd:
+            return None
+        args = [code]
+        error_msg = analyze_cmd.validate_args(args)
+        if error_msg:
+            return BotResponse.error_response(f"{error_msg}\n用法: `{analyze_cmd.usage}`")
+        logger.info("[Dispatcher] Direct NL routing → /analyze %s", code)
+        return await analyze_cmd.execute_async(message, args)
+
+    def _try_direct_analysis_routing_sync(self, message: BotMessage) -> Optional[BotResponse]:
+        is_private = message.chat_type.value == "private"
+        if not is_private and not message.mentioned:
+            return None
+        code = self._extract_direct_analysis_code(message.content.strip())
+        if not code:
+            return None
+        analyze_cmd = self.get_command("analyze")
+        if not analyze_cmd:
+            return None
+        args = [code]
+        error_msg = analyze_cmd.validate_args(args)
+        if error_msg:
+            return BotResponse.error_response(f"{error_msg}\n用法: `{analyze_cmd.usage}`")
+        logger.info("[Dispatcher] Direct NL routing → /analyze %s", code)
+        return analyze_cmd.execute(message, args)
 
     # Lightweight intent-parsing prompt.  Asks the LLM to output a small
     # JSON object so we can route to the right command.

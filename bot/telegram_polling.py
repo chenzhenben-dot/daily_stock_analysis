@@ -25,6 +25,7 @@ pip install requests
 - TELEGRAM_BOT_TOKEN: BotFather 给的 token（必填）
 - TELEGRAM_POLLING_TIMEOUT: 长轮询超时秒数（默认 30）
 - TELEGRAM_POLLING_INTERVAL: 轮询间隔秒数（默认 1）
+- TELEGRAM_DROP_PENDING_UPDATES: 启动时跳过历史积压消息（默认 true）
 - LOG_LEVEL: INFO / DEBUG
 """
 
@@ -71,6 +72,13 @@ def get_updates(token: str, offset: Optional[int], timeout: int) -> List[Dict[st
         logger.error("getUpdates failed: %s", data)
         return []
     return data.get("result", [])
+
+
+def offset_after_pending_updates(updates: List[Dict[str, Any]]) -> Optional[int]:
+    """Return the first update id after a batch of already-pending messages."""
+    update_ids = [item.get("update_id") for item in updates]
+    valid_ids = [update_id for update_id in update_ids if isinstance(update_id, int)]
+    return max(valid_ids) + 1 if valid_ids else None
 
 
 def process_update(platform: TelegramPlatform, update: Dict[str, Any]) -> None:
@@ -158,6 +166,21 @@ def main() -> int:
     )
 
     offset: Optional[int] = None
+    drop_pending = os.getenv("TELEGRAM_DROP_PENDING_UPDATES", "true").lower() not in {
+        "0", "false", "no", "off",
+    }
+    if drop_pending:
+        try:
+            # A negative offset asks Telegram for only the newest queued update
+            # and confirms all older updates, preventing stale commands on deploy.
+            pending = get_updates(token, -1, 0)
+            offset = offset_after_pending_updates(pending)
+            if offset is not None:
+                logger.info("已跳过启动前积压的 Telegram 消息")
+        except Exception as exc:
+            logger.error("清理 Telegram 积压消息失败: %s", exc)
+            return 1
+
     while running:
         try:
             updates = get_updates(token, offset, timeout)

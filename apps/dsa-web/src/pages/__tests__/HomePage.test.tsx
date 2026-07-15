@@ -868,13 +868,31 @@ describe('HomePage', () => {
     expect(marketReviewReport.className).not.toContain('overflow-y-auto');
     expect(screen.getByRole('heading', { name: '结构化大盘数据' })).toBeInTheDocument();
     expect(screen.getByText('3200')).toBeInTheDocument();
-    expect(screen.getByText('3150.2')).toBeInTheDocument();
+    expect(screen.getByText('3150.20')).toBeInTheDocument();
     expect(marketReviewReport.querySelector('h2, h3')?.textContent).not.toBe('A股市场复盘');
     expect(screen.getByRole('heading', { name: '指数概览' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '风险提示' })).toBeInTheDocument();
     expect(screen.getAllByRole('table').length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText('# A股市场复盘')).not.toBeInTheDocument();
     expect(screen.queryByText('开始分析')).not.toBeInTheDocument();
+  });
+
+  it('uses compact horizontal spacing for the dashboard workspace', () => {
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    const dashboard = screen.getByTestId('home-dashboard');
+    const workspace = dashboard.firstElementChild;
+    expect(workspace).toHaveClass('max-w-none');
+    expect(workspace).not.toHaveClass('mx-auto');
+    expect(workspace).not.toHaveClass('lg:max-w-6xl');
+
+    const dashboardScroll = screen.getByTestId('home-dashboard-scroll');
+    expect(dashboardScroll).toHaveClass('md:px-3');
+    expect(dashboardScroll).not.toHaveClass('md:px-6');
   });
 
   it('shows first-run setup gaps and links to settings', async () => {

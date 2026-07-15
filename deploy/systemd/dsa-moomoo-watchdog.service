@@ -1,0 +1,18 @@
+[Unit]
+Description=DSA Moomoo OpenD Watch Dog
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=90
+TimeoutStopSec=20
+ExecStartPre=/usr/bin/docker exec stock-server mkdir -p /app/scripts
+ExecStartPre=/usr/bin/docker cp /opt/dsa/scripts/moomoo_watchdog.py stock-server:/app/scripts/moomoo_watchdog.py
+ExecStart=/usr/bin/timeout --kill-after=10s 75s /usr/bin/docker exec stock-server python3 /app/scripts/moomoo_watchdog.py
+User=root
+WorkingDirectory=/opt/dsa
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -18,6 +18,51 @@ from src.services.stock_code_utils import resolve_index_stock_code_for_analysis
 logger = logging.getLogger(__name__)
 
 
+_FILLER_WORDS = (
+    "一下", "下", "帮我", "帮忙", "麻烦", "请", "看看", "看下", "看一下",
+    "分析", "分析一下", "查", "查一下", "研究", "诊断",
+)
+
+
+def normalize_analysis_args(args: List[str]) -> List[str]:
+    """Extract the ticker from loose Telegram phrasing.
+
+    Telegram users often send messages like "分析一下GRAB" or
+    "分析一下 GRAB". BotMessage already maps leading "分析" to this command,
+    so the first arg can contain filler words before the real ticker.
+    """
+    text = " ".join(args or []).strip()
+    if not text:
+        return []
+
+    report_type = "full" if re.search(r"(?i)\bfull\b|完整|详细", text) else None
+    cleaned = text
+    for word in _FILLER_WORDS:
+        cleaned = cleaned.replace(word, " ")
+    cleaned = re.sub(r"[，,。.!！?？:：;；`'\"“”‘’（）()\[\]{}<>]+", " ", cleaned)
+
+    patterns = (
+        r"\b\d{6}\b",
+        r"\b(?:HK|hk)\d{5}\b",
+        r"(?<![A-Za-z])(?:[A-Za-z]{1,5})(?:\.[A-Za-z]{1,2})?(?![A-Za-z])",
+    )
+    code = None
+    for pattern in patterns:
+        match = re.search(pattern, cleaned)
+        if match:
+            code = match.group(0).upper()
+            break
+
+    if not code:
+        parts = cleaned.strip().split()
+        return parts
+
+    normalized = [code]
+    if report_type:
+        normalized.append(report_type)
+    return normalized
+
+
 class AnalyzeCommand(BotCommand):
     """
     股票分析命令
@@ -47,6 +92,7 @@ class AnalyzeCommand(BotCommand):
     
     def validate_args(self, args: List[str]) -> Optional[str]:
         """验证参数"""
+        args = normalize_analysis_args(args)
         if not args:
             return "请输入股票代码"
         
@@ -67,6 +113,7 @@ class AnalyzeCommand(BotCommand):
     
     def execute(self, message: BotMessage, args: List[str]) -> BotResponse:
         """执行分析命令"""
+        args = normalize_analysis_args(args)
         code = resolve_index_stock_code_for_analysis(args[0])
         
         # 检查是否需要完整报告（默认精简，传 full/完整/详细 切换）

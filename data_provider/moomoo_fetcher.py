@@ -485,15 +485,15 @@ class MoomooFetcher(BaseFetcher):
         futu_code = self._normalize_code(stock_code)
         ctx = self._ensure_ctx()
         try:
-            ret, data = ctx.get_stock_quote([futu_code])
+            ret, data = ctx.get_market_snapshot([futu_code])
         except Exception as exc:
-            logger.warning("[Moomoo] get_stock_quote(%s) error: %s", futu_code, exc)
+            logger.warning("[Moomoo] get_market_snapshot(%s) error: %s", futu_code, exc)
             return None
         if ret != RET_OK or data is None:
             return None
         if isinstance(data, str):
             # Moomoo returns "未知股票 US.AAPL" or "暂不支持 ..." as a string
-            logger.debug("[Moomoo] get_stock_quote(%s) -> %s", futu_code, data)
+            logger.debug("[Moomoo] get_market_snapshot(%s) -> %s", futu_code, data)
             return None
         if len(data) == 0:
             return None
@@ -514,10 +514,10 @@ class MoomooFetcher(BaseFetcher):
             high=safe_float(row.get("high_price")),
             low=safe_float(row.get("low_price")),
             pre_close=safe_float(row.get("prev_close_price")),
-            pe_ratio=None,
-            pb_ratio=None,
-            market_cap=None,
-            circulating_market_cap=None,
+            pe_ratio=safe_float(row.get("pe_ratio")),
+            pb_ratio=safe_float(row.get("pb_ratio")),
+            total_mv=safe_float(row.get("total_market_val")),
+            circ_mv=safe_float(row.get("circular_market_val")),
         )
 
     # --- get_main_indices (DSA contract) ---

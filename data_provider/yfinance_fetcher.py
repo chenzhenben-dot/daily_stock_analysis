@@ -75,6 +75,20 @@ class YfinanceFetcher(BaseFetcher):
     name = "YfinanceFetcher"
     priority = int(os.getenv("YFINANCE_PRIORITY", "4"))
 
+    _US_SECTOR_ETFS = {
+        "XLB": ("原材料", "Materials"),
+        "XLC": ("通信服务", "Communication Services"),
+        "XLE": ("能源", "Energy"),
+        "XLF": ("金融", "Financials"),
+        "XLI": ("工业", "Industrials"),
+        "XLK": ("信息技术", "Information Technology"),
+        "XLP": ("必需消费品", "Consumer Staples"),
+        "XLRE": ("房地产", "Real Estate"),
+        "XLU": ("公用事业", "Utilities"),
+        "XLV": ("医疗保健", "Health Care"),
+        "XLY": ("非必需消费品", "Consumer Discretionary"),
+    }
+
     def __init__(self):
         """初始化 YfinanceFetcher"""
         pass
@@ -389,8 +403,8 @@ class YfinanceFetcher(BaseFetcher):
 
     def _get_us_main_indices(self, yf) -> Optional[List[Dict[str, Any]]]:
         """获取美股主要指数行情（SPX、IXIC、DJI、VIX），复用 _fetch_yf_ticker_data"""
-        # 大盘复盘所需核心美股指数（含 NDX 纳斯达克100 / RUT 罗素2000）
-        us_indices = ['SPX', 'IXIC', 'DJI', 'VIX', 'NDX', 'RUT']
+        # 大盘复盘所需核心美股指数
+        us_indices = ['SPX', 'IXIC', 'DJI', 'VIX']
         results = []
         try:
             for code in us_indices:
@@ -413,6 +427,68 @@ class YfinanceFetcher(BaseFetcher):
             logger.error(f"[Yfinance] 获取美股指数行情失败: {e}")
 
         return None
+
+    def get_us_sector_rankings(
+        self,
+        n: int = 5,
+        language: str = "zh",
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Rank the 11 GICS sectors using their liquid SPDR ETF daily moves."""
+        import yfinance as yf
+
+        symbols = list(self._US_SECTOR_ETFS)
+        try:
+            history = yf.download(
+                tickers=symbols,
+                period="5d",
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=True,
+            )
+            if history is None or history.empty:
+                return [], []
+
+            if isinstance(history.columns, pd.MultiIndex):
+                if "Close" in history.columns.get_level_values(0):
+                    closes = history["Close"]
+                elif "Close" in history.columns.get_level_values(-1):
+                    closes = history.xs("Close", axis=1, level=-1)
+                else:
+                    return [], []
+            elif "Close" in history.columns and len(symbols) == 1:
+                closes = history[["Close"]].rename(columns={"Close": symbols[0]})
+            else:
+                return [], []
+
+            rows: List[Dict[str, Any]] = []
+            use_english = str(language).strip().lower() == "en"
+            for symbol, (zh_name, en_name) in self._US_SECTOR_ETFS.items():
+                if symbol not in closes.columns:
+                    continue
+                valid_closes = pd.to_numeric(closes[symbol], errors="coerce").dropna()
+                if len(valid_closes) < 2:
+                    continue
+                previous = float(valid_closes.iloc[-2])
+                latest = float(valid_closes.iloc[-1])
+                if previous <= 0:
+                    continue
+                rows.append({
+                    "name": en_name if use_english else zh_name,
+                    "code": symbol,
+                    "change_pct": round((latest - previous) / previous * 100, 2),
+                    "source": "Yahoo Finance / SPDR sector ETF",
+                    "updated_at": str(valid_closes.index[-1]),
+                })
+
+            limit = max(1, int(n))
+            return (
+                sorted(rows, key=lambda row: row["change_pct"], reverse=True)[:limit],
+                sorted(rows, key=lambda row: row["change_pct"])[:limit],
+            )
+        except Exception as exc:
+            logger.warning("[Yfinance] 获取美股行业板块排行失败: %s", exc)
+            return [], []
 
     def _get_hk_main_indices(self, yf) -> Optional[List[Dict[str, Any]]]:
         """获取港股主要指数行情（HSI、HSTECH、HSCEI），复用 _fetch_yf_ticker_data"""

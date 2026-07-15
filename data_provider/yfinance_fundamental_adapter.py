@@ -270,6 +270,13 @@ class YfinanceFundamentalAdapter:
         events: List[Dict[str, Any]] = []
         try:
             div_series = ticker.dividends
+            if isinstance(div_series, pd.DataFrame):
+                if div_series.empty:
+                    div_series = pd.Series(dtype="float64")
+                elif "Dividends" in div_series.columns:
+                    div_series = div_series["Dividends"]
+                else:
+                    div_series = div_series.iloc[:, 0]
         except Exception as exc:
             result["errors"].append(f"dividends:{type(exc).__name__}")
             div_series = None

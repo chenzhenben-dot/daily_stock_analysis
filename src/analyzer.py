@@ -3804,6 +3804,9 @@ class GeminiAnalyzer:
             if isinstance(earnings_data, dict)
             else {}
         )
+        fmp_valuation = earnings_data.get("valuation_metrics", {}) if isinstance(earnings_data, dict) else {}
+        fmp_quality = earnings_data.get("quality_metrics", {}) if isinstance(earnings_data, dict) else {}
+        fmp_health = earnings_data.get("financial_health", {}) if isinstance(earnings_data, dict) else {}
         if isinstance(financial_report, dict) or isinstance(dividend_metrics, dict):
             financial_report = financial_report if isinstance(financial_report, dict) else {}
             dividend_metrics = dividend_metrics if isinstance(dividend_metrics, dict) else {}
@@ -3825,6 +3828,25 @@ class GeminiAnalyzer:
 | TTM 分红事件数 | {ttm_count} | |
 
 > 若上述字段为 N/A 或缺失，请明确写“数据缺失，无法判断”，禁止编造。
+"""
+
+        if any(isinstance(block, dict) and block for block in (fmp_valuation, fmp_quality, fmp_health)):
+            fmp_valuation = fmp_valuation if isinstance(fmp_valuation, dict) else {}
+            fmp_quality = fmp_quality if isinstance(fmp_quality, dict) else {}
+            fmp_health = fmp_health if isinstance(fmp_health, dict) else {}
+            prompt += f"""
+### FMP估值与质量指标（TTM）
+| 指标 | 数值 | 指标 | 数值 |
+|------|------|------|------|
+| P/E | {fmp_valuation.get('pe_ratio_ttm', 'N/A')} | P/B | {fmp_valuation.get('pb_ratio_ttm', 'N/A')} |
+| P/S | {fmp_valuation.get('price_to_sales_ttm', 'N/A')} | EV/Sales | {fmp_valuation.get('ev_to_sales_ttm', 'N/A')} |
+| EV/EBITDA | {fmp_valuation.get('ev_to_ebitda_ttm', 'N/A')} | FCF收益率 | {fmp_valuation.get('free_cash_flow_yield_ttm_pct', 'N/A')}% |
+| ROIC | {fmp_quality.get('roic_ttm_pct', 'N/A')}% | ROE | {fmp_quality.get('roe_ttm_pct', 'N/A')}% |
+| 毛利率 | {fmp_quality.get('gross_margin_ttm_pct', 'N/A')}% | 净利率 | {fmp_quality.get('net_margin_ttm_pct', 'N/A')}% |
+| 流动比率 | {fmp_health.get('current_ratio_ttm', 'N/A')} | 速动比率 | {fmp_health.get('quick_ratio_ttm', 'N/A')} |
+| 债务权益比 | {fmp_health.get('debt_to_equity_ttm', 'N/A')} | 利息保障倍数 | {fmp_health.get('interest_coverage_ttm', 'N/A')} |
+
+> 以上为FMP标准化TTM口径；与SEC原始财报口径冲突时，以SEC披露事实为准。
 """
 
         capital_flow_block = (

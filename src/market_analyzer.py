@@ -34,6 +34,7 @@ from src.schemas.market_light import MARKET_LIGHT_REGIONS, MarketLightSnapshot
 from src.services.run_diagnostics import record_llm_run, record_llm_run_started
 from src.services.intelligence_service import IntelligenceService
 from data_provider.base import DataFetcherManager
+from data_provider.fred_macro_adapter import FredMacroAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ class MarketOverview:
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
     top_concepts: List[Dict] = field(default_factory=list)    # 涨幅前5概念
     bottom_concepts: List[Dict] = field(default_factory=list) # 跌幅前5概念
+    macro_indicators: List[Dict[str, Any]] = field(default_factory=list)  # FRED宏观指标
 
 
 @dataclass
@@ -147,6 +149,7 @@ class MarketAnalyzer:
         self.search_service = search_service
         self.analyzer = analyzer
         self.data_manager = DataFetcherManager()
+        self._fred_macro_adapter = FredMacroAdapter()
         self.region = region if region in ("cn", "us", "hk", "jp", "kr") else "cn"
         self.profile: MarketProfile = get_profile(self.region)
         self.strategy = get_market_strategy_blueprint(self.region)
@@ -223,7 +226,7 @@ class MarketAnalyzer:
             }
             market_name = market_names.get(self.region, "A-share Market Recap")
             return f"## {date} {market_name}"
-        return f"## {date} {self._get_market_scope_name('zh')}大盘复盘"
+        return f"## {date} 大盘复盘"
 
     def _get_index_hint(self) -> str:
         if self._get_review_language() == "en":
@@ -438,15 +441,33 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if self.profile.has_market_stats:
             self._get_market_statistics(overview)
 
-        # 3. 获取板块涨跌榜（A 股有，美股暂无）
+        # 3. 获取板块涨跌榜（美股使用 SPDR 行业 ETF 代理）
         if self.profile.has_sector_rankings:
             self._get_sector_rankings(overview)
+        if self.region == "cn":
             self._get_concept_rankings(overview)
+
+        # 4. 美股复盘补充FRED官方宏观快照（fail-open）
+        if self.region == "us":
+            self._get_macro_indicators(overview)
         
         # 4. 获取北向资金（可选）
         # self._get_north_flow(overview)
         
         return overview
+
+    def _get_macro_indicators(self, overview: MarketOverview) -> None:
+        """Fetch official US macro indicators without blocking other market data."""
+        try:
+            overview.macro_indicators = self._fred_macro_adapter.fetch_snapshot()
+            logger.info(
+                "[大盘] %s action=get_fred_macro status=%s count=%d",
+                self._log_context(),
+                "success" if overview.macro_indicators else "empty",
+                len(overview.macro_indicators),
+            )
+        except Exception as exc:
+            logger.warning("[大盘] %s action=get_fred_macro status=failed error=%s", self._log_context(), exc)
 
     
     def _get_main_indices(self) -> List[MarketIndex]:
@@ -528,7 +549,11 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         try:
             logger.info("[大盘] %s action=get_sector_rankings status=start", self._log_context())
 
-            top_sectors, bottom_sectors = self.data_manager.get_sector_rankings(5)
+            top_sectors, bottom_sectors = self.data_manager.get_sector_rankings(
+                5,
+                region=self.region,
+                language=self._get_output_language(),
+            )
 
             if top_sectors or bottom_sectors:
                 overview.top_sectors = top_sectors
@@ -805,6 +830,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "top": list(overview.top_concepts or []),
                 "bottom": list(overview.bottom_concepts or []),
             },
+            "macro": list(overview.macro_indicators or []),
             "news": [self._normalize_news_item(item) for item in (news or [])[:8]],
             "sections": sections,
             "markdown_report": report,
@@ -1408,6 +1434,28 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         bottom_sectors_text = self._format_ranking_summary(overview.bottom_sectors)
         top_concepts_text = self._format_ranking_summary(overview.top_concepts)
         bottom_concepts_text = self._format_ranking_summary(overview.bottom_concepts)
+
+        macro_lines = []
+        for item in overview.macro_indicators:
+            if not isinstance(item, dict) or item.get("value") is None:
+                continue
+            name_key = "name_en" if review_language == "en" else "name_zh"
+            name = item.get(name_key) or item.get("series_id") or "FRED"
+            unit = str(item.get("unit") or "")
+            value_suffix = unit if unit == "%" else (f" {unit}" if unit else "")
+            change = item.get("change")
+            change_text = f", change {float(change):+.2f}{value_suffix}" if change is not None else ""
+            if review_language != "en" and change is not None:
+                change_text = f"，较前值 {float(change):+.2f}{value_suffix}"
+            observation_date = item.get("observation_date") or "unknown"
+            macro_lines.append(
+                f"- {name} ({item.get('series_id', 'FRED')}): "
+                f"{float(item['value']):.2f}{value_suffix}{change_text}; {observation_date}"
+            )
+        macro_block = ""
+        if macro_lines:
+            macro_title = "## Official Macro Snapshot (FRED)" if review_language == "en" else "## 官方宏观快照（FRED）"
+            macro_block = macro_title + "\n" + "\n".join(macro_lines)
         
         # 新闻信息 - 支持 SearchResult 对象或字典
         news_text = ""
@@ -1511,7 +1559,9 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 
         output_template_sections = self._build_output_template_sections(review_language)
         zh_market_scope_name = self._get_market_scope_name("zh")
-        zh_report_title = f"{overview.date} {zh_market_scope_name}大盘复盘"
+        zh_report_title = f"{overview.date} 大盘复盘"
+        if self.region in ("jp", "kr"):
+            zh_report_title = f"{overview.date} {zh_market_scope_name}大盘复盘"
         workflow_hint = (
             "报告要像交易员盘后工作台：先给结论，再按数据表、主线、催化、计划展开"
             if self.profile.has_market_stats or self.profile.has_sector_rankings
@@ -1543,6 +1593,8 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 {stats_block}
 
 {sector_block}
+
+{macro_block}
 
 {data_limits_block}
 
@@ -1597,6 +1649,8 @@ Output the report content directly, no extra commentary.
 {stats_block}
 
 {sector_block}
+
+{macro_block}
 
 {data_limits_block}
 
@@ -1751,7 +1805,7 @@ Market conditions can change quickly. The data above is for reference only and d
             if self.profile.has_market_stats
             else ""
         )
-        return f"""{self._get_review_title(overview.date)}
+        return f"""## {overview.date} 大盘复盘
 
 > 今日{market_label}市场整体呈现**{market_mood}**态势，优先观察{summary_focus}。
 
@@ -1815,7 +1869,8 @@ Market conditions can change quickly. The data above is for reference only and d
             if self._get_news_field(item, "url")
         }
         try:
-            service = IntelligenceService()
+            service = IntelligenceService(config=self.config)
+            service.refresh_auto_sources()
             payload = service.list_items(
                 scope_type="market",
                 market=self.region,

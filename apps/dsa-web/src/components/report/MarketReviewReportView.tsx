@@ -15,21 +15,6 @@ import { Card } from '../common';
 import { Tooltip } from '../common/Tooltip';
 import { ReportMarkdownBody } from './ReportMarkdownBody';
 
-const formatIndexNumber = (value: number | string | null | undefined, decimals = 2): string => {
-  if (value === null || value === undefined || value === '') return '—';
-  const num = Number(value);
-  if (!Number.isFinite(num)) return '—';
-  return num.toFixed(decimals);
-};
-
-const formatIndexChangePct = (value: number | string | null | undefined, decimals = 2): string => {
-  if (value === null || value === undefined || value === '') return '—';
-  const num = Number(value);
-  if (!Number.isFinite(num)) return '—';
-  const sign = num > 0 ? '+' : num < 0 ? '' : '';
-  return `${sign}${num.toFixed(decimals)}%`;
-};
-
 interface MarketReviewReportViewProps {
   report?: AnalysisReport;
   recordId?: number;
@@ -62,6 +47,7 @@ type StructuredMarketData = {
   indices: NonNullable<MarketReviewPayload['indices']>;
   sectors?: MarketReviewPayload['sectors'];
   concepts?: MarketReviewPayload['concepts'];
+  macro?: MarketReviewPayload['macro'];
 };
 
 const isMarketReviewPayload = (value: unknown): value is MarketReviewPayload =>
@@ -188,7 +174,8 @@ const hasRankingRows = (rankings?: MarketReviewPayload['sectors']): boolean =>
   Boolean(rankings?.top?.length || rankings?.bottom?.length);
 
 const hasStructuredMarketData = (payload?: MarketReviewPayload | null): boolean =>
-  Boolean(payload?.breadth || payload?.indices?.length || hasRankingRows(payload?.sectors) || hasRankingRows(payload?.concepts));
+  Boolean(payload?.breadth || payload?.indices?.length || payload?.macro?.length
+    || hasRankingRows(payload?.sectors) || hasRankingRows(payload?.concepts));
 
 const getStructuredMarketData = (payload?: MarketReviewPayload | null): StructuredMarketData[] => {
   if (!payload) {
@@ -205,6 +192,7 @@ const getStructuredMarketData = (payload?: MarketReviewPayload | null): Structur
         indices: marketPayload.indices || [],
         sectors: marketPayload.sectors,
         concepts: marketPayload.concepts,
+        macro: marketPayload.macro,
       }));
   }
 
@@ -219,7 +207,57 @@ const getStructuredMarketData = (payload?: MarketReviewPayload | null): Structur
     indices: payload.indices || [],
     sectors: payload.sectors,
     concepts: payload.concepts,
+    macro: payload.macro,
   }];
+};
+
+const coerceFiniteNumber = (value: unknown): number | null => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const normalizedValue = value.trim().replace(/,/g, '');
+    const numericText = normalizedValue.endsWith('%')
+      ? normalizedValue.slice(0, -1).trim()
+      : normalizedValue;
+    const parsed = Number(numericText);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+};
+
+const formatMarketNumber = (value: unknown, options?: { zeroAsMissing?: boolean }): string => {
+  const numericValue = coerceFiniteNumber(value);
+  if (numericValue === null || (options?.zeroAsMissing && numericValue === 0)) {
+    return '-';
+  }
+  return numericValue.toFixed(2);
+};
+
+const formatMarketCount = (value: unknown): string => {
+  const numericValue = coerceFiniteNumber(value);
+  return numericValue === null ? '-' : numericValue.toFixed(0);
+};
+
+const formatMarketAmount = (value: unknown, unit?: string): string => {
+  const formattedValue = formatMarketNumber(value);
+  if (formattedValue === '-') {
+    return '-';
+  }
+  return unit ? `${formattedValue} ${unit}` : formattedValue;
+};
+
+const formatMarketPercent = (value: unknown): string => {
+  const formattedValue = formatMarketNumber(value);
+  return formattedValue === '-' ? '-' : `${formattedValue}%`;
+};
+
+const formatMarketHighLow = (high: unknown, low: unknown): string => {
+  const highText = formatMarketNumber(high, { zeroAsMissing: true });
+  const lowText = formatMarketNumber(low, { zeroAsMissing: true });
+  return highText === '-' && lowText === '-' ? '-' : `${highText} / ${lowText}`;
 };
 
 const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
@@ -244,6 +282,11 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
   conceptBoards: string;
   leading: string;
   lagging: string;
+  macroIndicators: string;
+  macroValue: string;
+  macroChange: string;
+  asOf: string;
+  source: string;
 }> = {
   zh: {
     reviewSummary: '复盘摘要',
@@ -267,6 +310,11 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     conceptBoards: '概念板块',
     leading: '领涨',
     lagging: '领跌',
+    macroIndicators: '宏观环境',
+    macroValue: '最新值',
+    macroChange: '较前值',
+    asOf: '数据日期',
+    source: '来源',
   },
   en: {
     reviewSummary: 'Review Summary',
@@ -290,6 +338,11 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     conceptBoards: 'Concept Themes',
     leading: 'Leading',
     lagging: 'Lagging',
+    macroIndicators: 'Macro Environment',
+    macroValue: 'Latest',
+    macroChange: 'Change',
+    asOf: 'As of',
+    source: 'Source',
   },
   ko: {
     reviewSummary: '리뷰 요약',
@@ -313,6 +366,11 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     conceptBoards: '테마 섹터',
     leading: '강세',
     lagging: '약세',
+    macroIndicators: '거시 환경',
+    macroValue: '최신값',
+    macroChange: '이전 대비',
+    asOf: '기준일',
+    source: '출처',
   },
 };
 
@@ -323,6 +381,16 @@ const formatRankingChange = (value: unknown): string => {
   }
   const sign = numeric > 0 ? '+' : '';
   return `${sign}${numeric.toFixed(2)}%`;
+};
+
+const formatMacroNumber = (value: unknown, unit?: string, signed = false): string => {
+  const numeric = coerceFiniteNumber(value);
+  if (numeric === null) {
+    return '-';
+  }
+  const sign = signed && numeric > 0 ? '+' : '';
+  const suffix = unit === '%' ? '%' : unit ? ` ${unit}` : '';
+  return `${sign}${numeric.toFixed(2)}${suffix}`;
 };
 
 export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
@@ -367,41 +435,6 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
     [marketReviewPayload],
   );
   const showStructuredMarketTitles = Boolean(marketReviewPayload?.markets);
-  const [activeMarketId, setActiveMarketId] = useState<string | null>(null);
-  const showMarketTabBar = Boolean(marketReviewPayload?.markets && structuredMarketData.length > 1);
-
-  useEffect(() => {
-    if (!showMarketTabBar) {
-      if (activeMarketId !== null) {
-        setActiveMarketId(null);
-      }
-      return;
-    }
-    if (structuredMarketData.length === 0) {
-      if (activeMarketId !== null) {
-        setActiveMarketId(null);
-      }
-      return;
-    }
-    if (!activeMarketId || !structuredMarketData.some((m) => m.id === activeMarketId)) {
-      setActiveMarketId(structuredMarketData[0].id);
-    }
-  }, [structuredMarketData, showMarketTabBar, activeMarketId]);
-
-  const activeMarketData = activeMarketId
-    ? structuredMarketData.find((m) => m.id === activeMarketId) ?? null
-    : (showMarketTabBar ? null : (structuredMarketData[0] ?? null));
-
-  const sectionsByMarket = useMemo(() => {
-    const all = getPayloadSections(marketReviewPayload);
-    if (!showMarketTabBar || !activeMarketId) return all;
-    const prefix = `${activeMarketId}-`;
-    return all
-      .filter((s) => s.id.startsWith(prefix))
-      .map((s) => ({ ...s, id: s.id.slice(prefix.length) }));
-  }, [marketReviewPayload, showMarketTabBar, activeMarketId]);
-
-  const effectiveSections = sectionsByMarket.length > 0 ? sectionsByMarket : sections;
   const canOpenRunFlow = recordId !== undefined && onOpenRunFlow;
 
   useEffect(() => {
@@ -568,70 +601,50 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
 
       {structuredMarketData.length > 0 ? (
         <Card variant="bordered" padding="md" className="home-panel-card text-left">
-          <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                <BarChart3 className="h-4 w-4" aria-hidden="true" />
-              </span>
-              <h3 className="text-base font-semibold text-foreground">{marketReviewText.structuredMarketData}</h3>
-            </div>
-            {showMarketTabBar ? (
-              <div className="flex flex-wrap gap-1.5" role="tablist" aria-label={marketReviewText.structuredMarketData}>
-                {structuredMarketData.map((market) => {
-                  const isActive = market.id === activeMarketId;
-                  return (
-                    <button
-                      key={market.id}
-                      role="tab"
-                      aria-selected={isActive}
-                      type="button"
-                      onClick={() => setActiveMarketId(market.id)}
-                      className={
-                        isActive
-                          ? 'rounded-md border border-primary/60 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary transition-colors'
-                          : 'rounded-md border border-subtle bg-surface px-3 py-1.5 text-xs font-medium text-secondary-text transition-colors hover:bg-secondary/40'
-                      }
-                    >
-                      {market.title}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
+          <div className="mb-3 flex items-center gap-2">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <BarChart3 className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <h3 className="text-base font-semibold text-foreground">{marketReviewText.structuredMarketData}</h3>
           </div>
           <div className="space-y-5">
-            {activeMarketData ? (
-              <div key={activeMarketData.id} className="space-y-3">
-                {(showStructuredMarketTitles || showMarketTabBar) && activeMarketData.title ? (
-                  <h4 className="text-sm font-semibold text-foreground">{activeMarketData.title}</h4>
+            {structuredMarketData.map((marketData) => (
+              <div key={marketData.id} className="space-y-3">
+                {showStructuredMarketTitles ? (
+                  <h4 className="text-sm font-semibold text-foreground">{marketData.title}</h4>
                 ) : null}
-                {activeMarketData.breadth ? (
+                {marketData.breadth ? (
                   <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.advancers}</p>
-                      <p className="mt-1 font-semibold text-foreground">{activeMarketData.breadth.upCount ?? '-'}</p>
+                      <p className="mt-1 font-semibold text-foreground">
+                        {formatMarketCount(marketData.breadth.upCount)}
+                      </p>
                     </div>
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.decliners}</p>
-                      <p className="mt-1 font-semibold text-foreground">{activeMarketData.breadth.downCount ?? '-'}</p>
+                      <p className="mt-1 font-semibold text-foreground">
+                        {formatMarketCount(marketData.breadth.downCount)}
+                      </p>
                     </div>
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.limitUpDown}</p>
                       <p className="mt-1 font-semibold text-foreground">
-                        {activeMarketData.breadth.limitUpCount ?? '-'} / {activeMarketData.breadth.limitDownCount ?? '-'}
+                        {formatMarketCount(marketData.breadth.limitUpCount)} /{' '}
+                        {formatMarketCount(marketData.breadth.limitDownCount)}
                       </p>
                     </div>
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.turnover}</p>
                       <p className="mt-1 font-semibold text-foreground">
-                        {activeMarketData.breadth.totalAmount ?? '-'} {activeMarketData.breadth.turnoverUnit || ''}
+                        {formatMarketAmount(marketData.breadth.totalAmount, marketData.breadth.turnoverUnit)}
                       </p>
                     </div>
                   </div>
                 ) : (
                   <p className="text-sm text-secondary-text">{marketReviewText.noBreadthData}</p>
                 )}
-                {activeMarketData.indices.length > 0 ? (
+                {marketData.indices.length > 0 ? (
                   <div className="overflow-x-auto">
                     <table className="min-w-full text-sm">
                       <thead className="text-left text-xs uppercase text-muted-text">
@@ -643,12 +656,47 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-subtle">
-                        {activeMarketData.indices.map((index) => (
+                        {marketData.indices.map((index) => (
                           <tr key={index.code || index.name}>
                             <td className="px-2 py-2 font-medium text-foreground">{index.name}</td>
-                            <td className="px-2 py-2 text-secondary-text">{formatIndexNumber(index.current)}</td>
-                            <td className="px-2 py-2 text-secondary-text">{formatIndexChangePct(index.changePct)}</td>
-                            <td className="px-2 py-2 text-secondary-text">{formatIndexNumber(index.high)} / {formatIndexNumber(index.low)}</td>
+                            <td className="px-2 py-2 text-secondary-text">{formatMarketNumber(index.current)}</td>
+                            <td className="px-2 py-2 text-secondary-text">{formatMarketPercent(index.changePct)}</td>
+                            <td className="px-2 py-2 text-secondary-text">{formatMarketHighLow(index.high, index.low)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+                {marketData.macro?.length ? (
+                  <div className="overflow-x-auto">
+                    <p className="label-uppercase mb-2">{marketReviewText.macroIndicators}</p>
+                    <table className="min-w-full text-sm">
+                      <thead className="text-left text-xs uppercase text-muted-text">
+                        <tr>
+                          <th className="px-2 py-2">{marketReviewText.macroIndicators}</th>
+                          <th className="px-2 py-2">{marketReviewText.macroValue}</th>
+                          <th className="px-2 py-2">{marketReviewText.macroChange}</th>
+                          <th className="px-2 py-2">{marketReviewText.asOf}</th>
+                          <th className="px-2 py-2">{marketReviewText.source}</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-subtle">
+                        {marketData.macro.map((indicator) => (
+                          <tr key={indicator.seriesId}>
+                            <td className="px-2 py-2 font-medium text-foreground">
+                              {normalizedReportLanguage === 'zh'
+                                ? indicator.nameZh || indicator.nameEn || indicator.seriesId
+                                : indicator.nameEn || indicator.nameZh || indicator.seriesId}
+                            </td>
+                            <td className="px-2 py-2 font-mono text-secondary-text">
+                              {formatMacroNumber(indicator.value, indicator.unit)}
+                            </td>
+                            <td className="px-2 py-2 font-mono text-secondary-text">
+                              {formatMacroNumber(indicator.change, indicator.unit, true)}
+                            </td>
+                            <td className="px-2 py-2 text-secondary-text">{indicator.observationDate || '-'}</td>
+                            <td className="px-2 py-2 text-secondary-text">{indicator.source || '-'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -659,11 +707,11 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                   const boardTypes = [{
                     key: 'sectors' as const,
                     title: marketReviewText.industryBoards,
-                    rankings: activeMarketData.sectors,
+                    rankings: marketData.sectors,
                   }, {
                     key: 'concepts' as const,
                     title: marketReviewText.conceptBoards,
-                    rankings: activeMarketData.concepts,
+                    rankings: marketData.concepts,
                   }].filter(({ rankings }) => hasRankingRows(rankings));
                   if (boardTypes.length === 0) {
                     return null;
@@ -718,7 +766,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                   );
                 })()}
               </div>
-            ) : null}
+            ))}
           </div>
         </Card>
       ) : null}
@@ -741,7 +789,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
         </Card>
       ) : (
         <div data-testid="market-review-report" className="space-y-4">
-          {effectiveSections.map(({ id, title, content: sectionContent, icon: Icon }) => (
+          {sections.map(({ id, title, content: sectionContent, icon: Icon }) => (
             <Card key={id} variant="bordered" padding="md" className="home-panel-card text-left">
               <div className="mb-3 flex items-center gap-2">
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
