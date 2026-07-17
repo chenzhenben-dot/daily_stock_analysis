@@ -435,6 +435,41 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
     [marketReviewPayload],
   );
   const showStructuredMarketTitles = Boolean(marketReviewPayload?.markets);
+  const [activeMarketId, setActiveMarketId] = useState<string | null>(null);
+  const showMarketTabBar = Boolean(marketReviewPayload?.markets && structuredMarketData.length > 1);
+
+  useEffect(() => {
+    if (!showMarketTabBar) {
+      if (activeMarketId !== null) {
+        setActiveMarketId(null);
+      }
+      return;
+    }
+    if (structuredMarketData.length === 0) {
+      if (activeMarketId !== null) {
+        setActiveMarketId(null);
+      }
+      return;
+    }
+    if (!activeMarketId || !structuredMarketData.some((m) => m.id === activeMarketId)) {
+      setActiveMarketId(structuredMarketData[0].id);
+    }
+  }, [structuredMarketData, showMarketTabBar, activeMarketId]);
+
+  const activeMarketData = activeMarketId
+    ? structuredMarketData.find((m) => m.id === activeMarketId) ?? null
+    : (showMarketTabBar ? null : (structuredMarketData[0] ?? null));
+
+  const sectionsByMarket = useMemo(() => {
+    const all = getPayloadSections(marketReviewPayload);
+    if (!showMarketTabBar || !activeMarketId) return all;
+    const prefix = `${activeMarketId}-`;
+    return all
+      .filter((s) => s.id.startsWith(prefix))
+      .map((s) => ({ ...s, id: s.id.slice(prefix.length) }));
+  }, [marketReviewPayload, showMarketTabBar, activeMarketId]);
+
+  const effectiveSections = sectionsByMarket.length > 0 ? sectionsByMarket : sections;
   const canOpenRunFlow = recordId !== undefined && onOpenRunFlow;
 
   useEffect(() => {
@@ -601,50 +636,75 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
 
       {structuredMarketData.length > 0 ? (
         <Card variant="bordered" padding="md" className="home-panel-card text-left">
-          <div className="mb-3 flex items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <BarChart3 className="h-4 w-4" aria-hidden="true" />
-            </span>
-            <h3 className="text-base font-semibold text-foreground">{marketReviewText.structuredMarketData}</h3>
+          <div className="mb-3 flex items-center gap-3 overflow-x-auto pb-1">
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <BarChart3 className="h-4 w-4" aria-hidden="true" />
+              </span>
+              <h3 className="text-base font-semibold text-foreground">{marketReviewText.structuredMarketData}</h3>
+            </div>
+            {showMarketTabBar ? (
+              <div className="flex shrink-0 flex-nowrap gap-1.5" role="tablist" aria-label={marketReviewText.structuredMarketData}>
+                {structuredMarketData.map((market) => {
+                  const isActive = market.id === activeMarketId;
+                  return (
+                    <button
+                      key={market.id}
+                      role="tab"
+                      aria-selected={isActive}
+                      type="button"
+                      onClick={() => setActiveMarketId(market.id)}
+                      className={
+                        isActive
+                          ? 'whitespace-nowrap rounded-md border border-primary/60 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary transition-colors'
+                          : 'whitespace-nowrap rounded-md border border-subtle bg-surface px-3 py-1.5 text-xs font-medium text-secondary-text transition-colors hover:bg-secondary/40'
+                      }
+                    >
+                      {market.title}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
           <div className="space-y-5">
-            {structuredMarketData.map((marketData) => (
-              <div key={marketData.id} className="space-y-3">
-                {showStructuredMarketTitles ? (
-                  <h4 className="text-sm font-semibold text-foreground">{marketData.title}</h4>
+            {activeMarketData ? (
+              <div key={activeMarketData.id} className="space-y-3">
+                {(showStructuredMarketTitles || showMarketTabBar) && activeMarketData.title ? (
+                  <h4 className="text-sm font-semibold text-foreground">{activeMarketData.title}</h4>
                 ) : null}
-                {marketData.breadth ? (
+                {activeMarketData.breadth ? (
                   <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.advancers}</p>
                       <p className="mt-1 font-semibold text-foreground">
-                        {formatMarketCount(marketData.breadth.upCount)}
+                        {formatMarketCount(activeMarketData.breadth.upCount)}
                       </p>
                     </div>
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.decliners}</p>
                       <p className="mt-1 font-semibold text-foreground">
-                        {formatMarketCount(marketData.breadth.downCount)}
+                        {formatMarketCount(activeMarketData.breadth.downCount)}
                       </p>
                     </div>
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.limitUpDown}</p>
                       <p className="mt-1 font-semibold text-foreground">
-                        {formatMarketCount(marketData.breadth.limitUpCount)} /{' '}
-                        {formatMarketCount(marketData.breadth.limitDownCount)}
+                        {formatMarketCount(activeMarketData.breadth.limitUpCount)} /{' '}
+                        {formatMarketCount(activeMarketData.breadth.limitDownCount)}
                       </p>
                     </div>
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.turnover}</p>
                       <p className="mt-1 font-semibold text-foreground">
-                        {formatMarketAmount(marketData.breadth.totalAmount, marketData.breadth.turnoverUnit)}
+                        {formatMarketAmount(activeMarketData.breadth.totalAmount, activeMarketData.breadth.turnoverUnit)}
                       </p>
                     </div>
                   </div>
                 ) : (
                   <p className="text-sm text-secondary-text">{marketReviewText.noBreadthData}</p>
                 )}
-                {marketData.indices.length > 0 ? (
+                {activeMarketData.indices.length > 0 ? (
                   <div className="overflow-x-auto">
                     <table className="min-w-full text-sm">
                       <thead className="text-left text-xs uppercase text-muted-text">
@@ -656,7 +716,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-subtle">
-                        {marketData.indices.map((index) => (
+                        {activeMarketData.indices.map((index) => (
                           <tr key={index.code || index.name}>
                             <td className="px-2 py-2 font-medium text-foreground">{index.name}</td>
                             <td className="px-2 py-2 text-secondary-text">{formatMarketNumber(index.current)}</td>
@@ -668,7 +728,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                     </table>
                   </div>
                 ) : null}
-                {marketData.macro?.length ? (
+                {activeMarketData.macro?.length ? (
                   <div className="overflow-x-auto">
                     <p className="label-uppercase mb-2">{marketReviewText.macroIndicators}</p>
                     <table className="min-w-full text-sm">
@@ -682,7 +742,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-subtle">
-                        {marketData.macro.map((indicator) => (
+                        {activeMarketData.macro.map((indicator) => (
                           <tr key={indicator.seriesId}>
                             <td className="px-2 py-2 font-medium text-foreground">
                               {normalizedReportLanguage === 'zh'
@@ -707,11 +767,11 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                   const boardTypes = [{
                     key: 'sectors' as const,
                     title: marketReviewText.industryBoards,
-                    rankings: marketData.sectors,
+                    rankings: activeMarketData.sectors,
                   }, {
                     key: 'concepts' as const,
                     title: marketReviewText.conceptBoards,
-                    rankings: marketData.concepts,
+                    rankings: activeMarketData.concepts,
                   }].filter(({ rankings }) => hasRankingRows(rankings));
                   if (boardTypes.length === 0) {
                     return null;
@@ -766,7 +826,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                   );
                 })()}
               </div>
-            ))}
+            ) : null}
           </div>
         </Card>
       ) : null}
@@ -789,7 +849,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
         </Card>
       ) : (
         <div data-testid="market-review-report" className="space-y-4">
-          {sections.map(({ id, title, content: sectionContent, icon: Icon }) => (
+          {effectiveSections.map(({ id, title, content: sectionContent, icon: Icon }) => (
             <Card key={id} variant="bordered" padding="md" className="home-panel-card text-left">
               <div className="mb-3 flex items-center gap-2">
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">

@@ -147,12 +147,19 @@ describe('MarketReviewReportView', () => {
       />,
     );
 
-    expect(screen.getByText('A股市场')).toBeInTheDocument();
-    expect(screen.getByText('港股市场')).toBeInTheDocument();
-    expect(screen.getByText('沪深300')).toBeInTheDocument();
-    expect(screen.getByText('恒生指数')).toBeInTheDocument();
-    expect(screen.getByText('3120')).toBeInTheDocument();
-    expect(screen.getByText('680')).toBeInTheDocument();
+    const cnTab = screen.getByRole("tab", { name: "A股市场" });
+    const hkTab = screen.getByRole("tab", { name: "港股市场" });
+    expect(cnTab).toHaveAttribute("aria-selected", "true");
+    expect(hkTab).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByText("沪深300")).toBeInTheDocument();
+    expect(screen.getByText("3120")).toBeInTheDocument();
+
+    fireEvent.click(hkTab);
+
+    expect(hkTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("恒生指数")).toBeInTheDocument();
+    expect(screen.getByText("680")).toBeInTheDocument();
+    expect(screen.queryByText("沪深300")).not.toBeInTheDocument();
   });
 
   it('renders industry and concept rankings from structured market review payloads', () => {
@@ -182,14 +189,14 @@ describe('MarketReviewReportView', () => {
     );
 
     expect(screen.getByText('结构化大盘数据')).toBeInTheDocument();
-    expect(screen.getAllByText('上涨家数')).toHaveLength(2);
-    expect(screen.getAllByText('下跌家数')).toHaveLength(2);
-    expect(screen.getAllByText('涨停/跌停')).toHaveLength(2);
-    expect(screen.getAllByText('成交额')).toHaveLength(2);
-    expect(screen.getAllByText('指数')).toHaveLength(2);
-    expect(screen.getAllByText('最新')).toHaveLength(2);
-    expect(screen.getAllByText('涨跌幅')).toHaveLength(2);
-    expect(screen.getAllByText('高/低')).toHaveLength(2);
+    expect(screen.getAllByText('上涨家数')).toHaveLength(1);
+    expect(screen.getAllByText('下跌家数')).toHaveLength(1);
+    expect(screen.getAllByText('涨停/跌停')).toHaveLength(1);
+    expect(screen.getAllByText('成交额')).toHaveLength(1);
+    expect(screen.getAllByText('指数')).toHaveLength(1);
+    expect(screen.getAllByText('最新')).toHaveLength(1);
+    expect(screen.getAllByText('涨跌幅')).toHaveLength(1);
+    expect(screen.getAllByText('高/低')).toHaveLength(1);
     expect(screen.queryByText('Structured Market Data')).not.toBeInTheDocument();
     expect(screen.queryByText('Advancers')).not.toBeInTheDocument();
     expect(screen.queryByText('Index')).not.toBeInTheDocument();
