@@ -1519,6 +1519,24 @@ class TestTelegramSender(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(mock_post.call_count, 2)
 
+    @mock.patch("src.notification_sender.telegram_sender.requests.post")
+    def test_chunked_send_splits_single_oversized_section(self, mock_post):
+        mock_post.return_value = _response(200, {"ok": True})
+        cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
+        sender = TelegramSender(cfg)
+        oversized_section = (
+            "[market signal](https://example.com/report) important update\n" * 180
+        )
+        content = "# Market review\n---\n" + oversized_section + "\n---\nTail"
+
+        result = sender.send_to_telegram(content)
+
+        self.assertTrue(result)
+        self.assertGreater(mock_post.call_count, 3)
+        for call in mock_post.call_args_list:
+            payload = call.kwargs["json"]
+            self.assertLessEqual(len(payload["text"]), 4096)
+
 
 if __name__ == "__main__":
     unittest.main()

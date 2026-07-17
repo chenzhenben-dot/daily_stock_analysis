@@ -84,7 +84,7 @@ class TelegramSender:
             # Telegram 消息最大长度 4096 字符
             max_length = 4096
 
-            if len(content) <= max_length:
+            if len(self._convert_to_telegram_markdown(content)) <= max_length:
                 # 单条消息发送
                 return self._send_telegram_message(api_url, chat_id, content, message_thread_id, timeout_seconds=timeout_seconds)
             else:
@@ -231,6 +231,45 @@ class TelegramSender:
         logger.error(f"响应内容: {response.text}")
         return False
 
+    def _split_telegram_text(self, text: str, max_length: int) -> list[str]:
+        """Split one section so every rendered Telegram payload fits."""
+        if not text:
+            return [""]
+
+        chunks = []
+        remaining = text
+        while remaining:
+            if len(self._convert_to_telegram_markdown(remaining)) <= max_length:
+                chunks.append(remaining)
+                break
+
+            low, high = 1, len(remaining)
+            safe_cut = 1
+            while low <= high:
+                middle = (low + high) // 2
+                rendered_length = len(
+                    self._convert_to_telegram_markdown(remaining[:middle])
+                )
+                if rendered_length <= max_length:
+                    safe_cut = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+
+            newline_cut = remaining.rfind("\n", 0, safe_cut + 1)
+            space_cut = remaining.rfind(" ", 0, safe_cut + 1)
+            natural_cut = max(newline_cut, space_cut)
+            if natural_cut >= max(1, safe_cut // 2):
+                safe_cut = natural_cut + 1
+
+            chunk = remaining[:safe_cut].rstrip()
+            if not chunk:
+                chunk = remaining[:safe_cut]
+            chunks.append(chunk)
+            remaining = remaining[safe_cut:].lstrip()
+
+        return chunks
+
     def _send_telegram_chunked(
         self,
         api_url: str,
@@ -242,38 +281,38 @@ class TelegramSender:
         timeout_seconds: Optional[float] = None,
     ) -> bool:
         """分段发送长 Telegram 消息"""
-        # 按段落分割
-        sections = content.split("\n---\n")
+        separator = "\n---\n"
+        chunks = []
+        current_chunk = ""
 
-        current_chunk = []
-        current_length = 0
-        all_success = True
-        chunk_index = 1
+        for section in content.split(separator):
+            for section_part in self._split_telegram_text(section, max_length):
+                candidate = (
+                    section_part
+                    if not current_chunk
+                    else current_chunk + separator + section_part
+                )
+                if len(self._convert_to_telegram_markdown(candidate)) <= max_length:
+                    current_chunk = candidate
+                    continue
 
-        for section in sections:
-            section_length = len(section) + 5  # +5 for "\n---\n"
-
-            if current_length + section_length > max_length:
-                # 发送当前块
                 if current_chunk:
-                    chunk_content = "\n---\n".join(current_chunk)
-                    logger.info(f"发送 Telegram 消息块 {chunk_index}...")
-                    if not self._send_telegram_message(api_url, chat_id, chunk_content, message_thread_id, timeout_seconds=timeout_seconds):
-                        all_success = False
-                    chunk_index += 1
+                    chunks.append(current_chunk)
+                current_chunk = section_part
 
-                # 重置
-                current_chunk = [section]
-                current_length = section_length
-            else:
-                current_chunk.append(section)
-                current_length += section_length
-
-        # 发送最后一块
         if current_chunk:
-            chunk_content = "\n---\n".join(current_chunk)
+            chunks.append(current_chunk)
+
+        all_success = True
+        for chunk_index, chunk_content in enumerate(chunks, start=1):
             logger.info(f"发送 Telegram 消息块 {chunk_index}...")
-            if not self._send_telegram_message(api_url, chat_id, chunk_content, message_thread_id, timeout_seconds=timeout_seconds):
+            if not self._send_telegram_message(
+                api_url,
+                chat_id,
+                chunk_content,
+                message_thread_id,
+                timeout_seconds=timeout_seconds,
+            ):
                 all_success = False
 
         return all_success
