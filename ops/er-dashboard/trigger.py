@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import html
 import os
 import re
 import sys
@@ -30,6 +31,20 @@ ACTION_MAP = {
 }
 LIST_FIELDS = {"monitoring_metrics", "product_milestones", "valuation_assumptions", "invalidation_conditions", "sell_conditions", "data_conflicts", "data_sources"}
 ROW_FIELDS = {"latest_quarter_rows", "fy_comparison_rows", "segment_rows", "guidance_rows", "valuation_rows", "balance_sheet_rows", "comp_financial_rows", "customer_rows", "catalyst_rows", "business_rows", "product_rows", "chain_rows"}
+ROW_SCHEMAS = {
+    "latest_quarter_rows": ["指标", "上季度", "本季度", "Q/Q", "vs预期", "评价"],
+    "fy_comparison_rows": ["指标", "2025", "2024", "YoY"],
+    "segment_rows": ["业务", "收入", "占比", "YoY", "Net Income", "战略作用"],
+    "guidance_rows": ["指标", "指引", "YoY", "关键假设"],
+    "valuation_rows": ["指标", "当前", "5y中位数", "评价"],
+    "balance_sheet_rows": ["项目", "金额", "YoY变化", "解读"],
+    "business_rows": ["业务/分部", "收入", "占比", "同比", "环比", "投资含义"],
+    "product_rows": ["产品", "是什么", "客户为什么付钱", "成功看什么"],
+    "chain_rows": ["上游采购", "→", "公司业务", "→", "下游客户"],
+    "comp_financial_rows": ["公司", "相关业务", "收入", "增速", "毛利率", "EV/Sales", "备注"],
+    "customer_rows": ["客户", "协议", "时间", "业务", "验证状态"],
+    "catalyst_rows": ["类别", "事件", "时间", "维度"],
+}
 CLASS_FIELDS = {"action_class", "conclusion_class", "price_change_class", "ytd_class", "revenue_change_class", "eps_change_class", "business_cycle_class", "price_cycle_class", "risk_self_class", "risk_substitute_class", "risk_geo_class", "risk_cycle_class", "verify_paid_class", "verify_repeat_class", "verify_production_class", "verify_concentration_class", "verify_source_class"}
 
 FULL_RESEARCH_FIELD_GROUPS = [
@@ -510,6 +525,36 @@ def rows_to_html(rows, cols=2):
     return "\n".join(out)
 
 
+def normalize_model_row_html(field, value):
+    expected_cols = len(ROW_SCHEMAS[field])
+    if not isinstance(value, str):
+        value = rows_to_html(value, cols=expected_cols)
+    raw = html.unescape(html.unescape(value))
+    row_blocks = re.findall(r"(?is)<tr[^>]*>(.*?)</tr>", raw)
+    normalized = []
+    for block in row_blocks:
+        if re.search(r"(?is)<th[^>]*>", block):
+            continue
+        cells = re.findall(r"(?is)<td[^>]*>(.*?)</td>", block)
+        if len(cells) != expected_cols:
+            return None
+        clean_cells = []
+        for cell in cells:
+            text = re.sub(r"(?s)<[^>]+>", " ", html.unescape(cell))
+            text = re.sub(r"\s+", " ", text).strip()
+            clean_cells.append("<td>{}</td>".format(html_escape(text or "未披露 / 待验证")))
+        normalized.append("<tr>{}</tr>".format("".join(clean_cells)))
+    if not normalized:
+        return None
+    return "\n".join(normalized)
+
+
+def clean_model_field(field, value):
+    if field in ROW_SCHEMAS:
+        return normalize_model_row_html(field, value)
+    return value
+
+
 def default_dashboard(ticker, stock_data, reason="待生成"):
     today = time.strftime("%Y-%m-%d")
     analysis_timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -545,6 +590,7 @@ def default_dashboard(ticker, stock_data, reason="待生成"):
 
 def build_prompt(ticker, stock_data, compact=False, fields_override=None, stage_name="完整研究"):
     fields = fields_override or template_placeholders()
+    row_schemas = {field: ROW_SCHEMAS[field] for field in fields if field in ROW_SCHEMAS}
     today = time.strftime("%Y-%m-%d")
     analysis_timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     skill = SKILL_PATH.read_text(encoding="utf-8")
@@ -554,7 +600,7 @@ def build_prompt(ticker, stock_data, compact=False, fields_override=None, stage_
 你是 equity-research 完整工作流中的单阶段执行器。程序会按顺序分别完成公司概览、财务估值、业务产业链、竞对客户、周期行动监控五个阶段；你只完成当前阶段和当前字段,不要重新规划整套报告,不要输出提纲。
 研究纪律:
 1. 数字只用提供的来源,必须保留日期和口径；找不到写“未披露 / 待验证”,禁止猜测。
-2. 公司一手披露/SEC > FMP/Alpha Vantage/StockAnalysis > 搜索摘要 > 模型记忆。
+2. 公司一手披露/SEC > FMP/Alpha Vantage/StockAnalysis > 搜索摘要。禁止用模型记忆补数字、日期、客户协议、并购或产能事实。
 3. 单源结论标“待交叉验证”；数据冲突要列明,不强行选一个。
 4. 不写“某某等/等等/其他等”；产品、客户、业务尽量列全。
 5. 先判断真实产业链,不默认套 AI；技术面只用于择时。
@@ -580,6 +626,8 @@ def build_prompt(ticker, stock_data, compact=False, fields_override=None, stage_
 
 你只输出 JSON,不要 markdown fence。必须给 dashboard_data,覆盖以下模板字段:
 {json.dumps(fields, ensure_ascii=False)}
+本批表格字段的固定列定义:
+{json.dumps(row_schemas, ensure_ascii=False)}
 
 JSON 格式:
 {{"dashboard_data":{{...仅包含本批明确列出的模板字段...}}}}
@@ -587,7 +635,7 @@ JSON 格式:
 字段规则:
 - dashboard_data 只能包含本批明确列出的字段,禁止添加任何额外字段。
 - 普通文本字段控制在 60-160 个中文字符；表格每个单元格保持简洁。
-- *_rows 字段输出 HTML <tr><td>...</td></tr> 字符串。
+- *_rows 字段只能输出 HTML <tr><td>...</td></tr> 字符串,禁止输出 <th>；每行 td 数量必须严格等于固定列定义。
 - monitoring_metrics/product_milestones/valuation_assumptions/invalidation_conditions/sell_conditions/data_conflicts/data_sources 输出 list。
 - action_class 只能是 buy/hold/wait/try/reduce/sell/avoid/watch。
 - class 字段用 pos/neg/warn 或 action class。
@@ -597,6 +645,7 @@ JSON 格式:
 - current_date 必须等于 {today}; analysis_timestamp 必须等于 {analysis_timestamp}。禁止输出历史分析时间。
 - 不要复用旧报告、旧结论或旧页脚；如果某个最新财报/价格/估值数据无法核验,标注“未披露 / 待验证”并说明数据源缺口。
 - 优先使用 high-priority JSON 里的 research_sources；公司 IR/SEC 正文、FMP、StockAnalysis 和最新搜索结果高于模型记忆。
+- 搜索摘要只能用于发现线索和定性描述,不能单独支撑精确数字、客户合同、并购状态或明确日期。
 - 如果 research_sources 全部失败,必须在 data_sources/data_conflicts 里说明“实时源抓取失败”,不得装作已完整验证。
 """
 
@@ -720,6 +769,7 @@ def call_llm(ticker, stock_data, env):
                 data = obj.get("dashboard_data", obj) if isinstance(obj, dict) else {}
                 if not isinstance(data, dict):
                     return None, "{} batch {}/{} missing dashboard_data".format(stage_name, chunk_index, len(chunks))
+                data = {field: clean_model_field(field, data.get(field)) for field in chunk}
                 missing = [field for field in chunk if data.get(field) in (None, "", [], {})]
                 if missing:
                     retry_data = trim_stock_data_for_prompt(stock_data, per_source_limit=600, max_sources=24)
@@ -737,7 +787,7 @@ def call_llm(ticker, stock_data, env):
                         return None, "{} incomplete and retry failed: {}".format(stage_name, retry_err)
                     retry_values = retry_obj.get("dashboard_data", retry_obj) if isinstance(retry_obj, dict) else {}
                     if isinstance(retry_values, dict):
-                        data.update(retry_values)
+                        data.update({field: clean_model_field(field, retry_values.get(field)) for field in missing})
                     missing = [field for field in chunk if data.get(field) in (None, "", [], {})]
                     if missing:
                         return None, "{} still missing fields: {}".format(stage_name, ",".join(missing))
@@ -759,6 +809,26 @@ def normalize_dashboard_data(ticker, stock_data, obj, reason=None):
     base["TICKER"] = ticker
     base["current_date"] = time.strftime("%Y-%m-%d")
     base["analysis_timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    for source_key, target_key in (
+        ("company_name", "company_name"), ("exchange", "exchange"), ("industry", "industry"),
+        ("price", "current_price"), ("fwd_pe", "forward_pe"),
+        ("wk52_high", "week52_high"), ("wk52_low", "week52_low"),
+    ):
+        if stock_data.get(source_key) not in (None, ""):
+            base[target_key] = str(stock_data[source_key])
+    if stock_data.get("market_cap") not in (None, ""):
+        market_cap = stock_data["market_cap"]
+        try:
+            market_cap_number = float(market_cap)
+            if market_cap_number >= 1e12:
+                market_cap = "${:.2f}T".format(market_cap_number / 1e12)
+            elif market_cap_number >= 1e9:
+                market_cap = "${:.2f}B".format(market_cap_number / 1e9)
+            elif market_cap_number >= 1e6:
+                market_cap = "${:.2f}M".format(market_cap_number / 1e6)
+        except (TypeError, ValueError):
+            pass
+        base["market_cap"] = str(market_cap)
     action_class, action_label = ACTION_MAP.get(str(base.get("action_class") or base.get("action_label") or "watch"), ("watch", "观察名单"))
     base["action_class"] = action_class
     base["action_label"] = base.get("action_label") if base.get("action_label") not in ("", None, "未披露 / 待验证") else action_label
@@ -812,6 +882,12 @@ def check_compliance(data):
     for bad in ("快速版未覆盖", "需要按 skill 补充", "待生成"):
         if bad in text:
             issues.append("Incomplete research marker: " + bad)
+    for bad in ("模型记忆", "行业常识"):
+        if bad in text:
+            issues.append("Unsupported evidence source: " + bad)
+    for field in ROW_SCHEMAS:
+        if normalize_model_row_html(field, data.get(field)) is None:
+            issues.append("Invalid row schema: " + field)
     today = time.strftime("%Y-%m-%d")
     if data.get("current_date") != today:
         issues.append(f"Stale current_date: {data.get('current_date')}")
@@ -880,6 +956,7 @@ def trigger(ticker, force=False):
     os.makedirs(DASH_DIR, exist_ok=True)
     output_file = os.path.join(DASH_DIR, f"{ticker}-{today}.html")
     md_file = os.path.join(DASH_DIR, f"{ticker}-{today}.md")
+    json_file = os.path.join(DASH_DIR, f"{ticker}-{today}.json")
     if os.path.isfile(output_file) and not force:
         return output_file, "exists"
     stock_data = fetch_stock_data(ticker)
@@ -891,12 +968,19 @@ def trigger(ticker, force=False):
     if action_note:
         data["action_rationale"] = (data.get("action_rationale", "") or "") + " | " + action_note
     issues = check_compliance(data)
-    fatal_issues = [issue for issue in issues if issue.startswith("Missing placeholder:") or issue.startswith("Incomplete research marker:")]
+    fatal_issues = [
+        issue for issue in issues
+        if issue.startswith("Missing placeholder:")
+        or issue.startswith("Incomplete research marker:")
+        or issue.startswith("Unsupported evidence source:")
+        or issue.startswith("Invalid row schema:")
+    ]
     if fatal_issues:
         raise RuntimeError("ER full-skill quality gate failed: " + "; ".join(fatal_issues[:12]))
     render_dashboard(data, output_file)
     md = render_markdown_report(ticker, data)
     Path(md_file).write_text(md, encoding="utf-8")
+    Path(json_file).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     status = f"generated,compliance:{len(issues)}"
     if err:
         status += f",llm_error:{err[:120]}"
