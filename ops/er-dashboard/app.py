@@ -127,10 +127,10 @@ def run_er_job(job_id):
         return
 
     if not ER_JOB_LOCK.acquire(False):
-        message = "服务器已有 ER 深度分析正在运行，请等待完成后重试"
-        update_job(job_id, status="failed", message=message, error=message)
-        log_job(job_id, "failed", message)
-        return
+        message = "已有 ER 深度分析正在运行，本任务已进入队列"
+        update_job(job_id, status="queued", message=message)
+        log_job(job_id, "queued", message)
+        ER_JOB_LOCK.acquire()
 
     update_job(job_id, status="running", message="正在执行 ER skill: 抓取最新行情、财报、估值和业务数据")
     log_job(job_id, "running", "ER skill started")
