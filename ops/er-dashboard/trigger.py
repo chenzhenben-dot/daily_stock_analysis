@@ -568,12 +568,14 @@ Output HTML 看板使用官方 7 tab 模板:概览、财务估值、业务 & 产
 - 不要输出 markdown_report,不要输出长篇解释。
 """.strip() if compact else ""
 
+    hard_rules_start = skill.find("## Hard rules")
+    hard_rules = skill[hard_rules_start:hard_rules_start + 7000] if hard_rules_start >= 0 else ""
     return f"""{skill_digest}
 
-以下是本次必须实际遵守的 equity-research SKILL.md 原文：
-<skill>
-{skill}
-</skill>
+以下是本次必须实际遵守的 equity-research Hard rules 原文：
+<hard_rules>
+{hard_rules}
+</hard_rules>
 
 股票: {ticker}
 当前研究阶段: {stage_name}
@@ -657,14 +659,21 @@ def call_llm(ticker, stock_data, env):
         }
         req = urllib.request.Request(base_url + "/chat/completions", data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key})
         raw = urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8")
-        content = json.loads(raw)["choices"][0]["message"]["content"]
+        response = json.loads(raw)
+        choice = response["choices"][0]
+        message = choice["message"]
+        content = message.get("content") or ""
+        if not content and "{" in str(message.get("reasoning") or ""):
+            content = message.get("reasoning") or ""
+        if not content:
+            return None, "empty model content (finish_reason={})".format(choice.get("finish_reason")), ""
         return extract_json(content)
 
     merged = {"dashboard_data": {}}
     total_stages = len(FULL_RESEARCH_FIELD_GROUPS)
     for stage_index, (stage_name, fields) in enumerate(FULL_RESEARCH_FIELD_GROUPS, 1):
         print("ER_STAGE {}/{} {}".format(stage_index, total_stages, stage_name), flush=True)
-        prompt_data = trim_stock_data_for_prompt(stock_data, per_source_limit=1800, max_sources=24)
+        prompt_data = trim_stock_data_for_prompt(stock_data, per_source_limit=900, max_sources=24)
         if merged["dashboard_data"]:
             prompt_data["completed_stage_data"] = merged["dashboard_data"]
         try:
@@ -675,7 +684,7 @@ def call_llm(ticker, stock_data, env):
                 fields_override=fields,
                 stage_name=stage_name,
             )
-            obj, err, raw_content = request_json(prompt, max_tokens=16000, timeout=300)
+            obj, err, raw_content = request_json(prompt, max_tokens=12000, timeout=300)
             if err:
                 Path("/tmp/er-llm-last.txt").write_text(raw_content[:20000], encoding="utf-8")
                 return None, "{} JSON failed: {}".format(stage_name, err)
@@ -684,7 +693,7 @@ def call_llm(ticker, stock_data, env):
                 return None, "{} missing dashboard_data".format(stage_name)
             missing = [field for field in fields if data.get(field) in (None, "", [], {})]
             if missing:
-                retry_data = trim_stock_data_for_prompt(stock_data, per_source_limit=900, max_sources=24)
+                retry_data = trim_stock_data_for_prompt(stock_data, per_source_limit=600, max_sources=24)
                 retry_data["completed_stage_data"] = dict(merged["dashboard_data"], **data)
                 retry_prompt = build_prompt(
                     ticker,
