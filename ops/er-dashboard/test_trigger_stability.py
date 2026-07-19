@@ -41,12 +41,19 @@ class TriggerStabilityTests(unittest.TestCase):
         value = "Q4 FY2026 核心营收预期同比 +300% 以上（来源：公司指引）"
         self.assertEqual(TRIGGER.compact_metric(value, "percent"), "+300%")
 
-    def test_truncates_header_rationale(self):
-        data = {field: "未披露 / 待验证" for field in TRIGGER.SHORT_DISPLAY_FIELDS}
-        data["action_rationale"] = "结论" * 100
-        TRIGGER.compact_dashboard_display(data)
-        self.assertLessEqual(len(data["action_rationale"]), 160)
-        self.assertTrue(data["action_rationale"].endswith("…"))
+    def test_removes_action_fields(self):
+        data = {"action_class": "buy", "action_label": "买入", "action_rationale": "建议买入"}
+        TRIGGER.remove_prohibited_advice(data)
+        self.assertEqual(data, {})
+
+    def test_removes_price_and_position_advice(self):
+        data = {
+            "one_liner": "公司收入增长。目标价为 100 美元；继续观察产品进展。",
+            "monitoring_metrics": ["关注毛利率", "建议仓位不超过 3%"],
+        }
+        TRIGGER.remove_prohibited_advice(data)
+        self.assertEqual(data["one_liner"], "公司收入增长。继续观察产品进展。")
+        self.assertEqual(data["monitoring_metrics"], ["关注毛利率"])
 
 
 if __name__ == "__main__":

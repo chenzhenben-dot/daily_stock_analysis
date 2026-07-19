@@ -19,16 +19,6 @@ SKILL_PATH = SKILL_DIR / "SKILL.md"
 TEMPLATE_PATH = SKILL_DIR / "references/dashboard-template.html"
 GENERATOR_PATH = SKILL_DIR / "references/dashboard-generator.py"
 
-ACTION_MAP = {
-    "可以买/加仓": ("buy", "可以买/加仓"), "买入": ("buy", "可以买/加仓"), "buy": ("buy", "可以买/加仓"), "add": ("buy", "可以买/加仓"),
-    "持有": ("hold", "持有"), "hold": ("hold", "持有"),
-    "等待回调": ("wait", "等待回调"), "wait": ("wait", "等待回调"),
-    "小仓试错": ("try", "小仓试错"), "try": ("try", "小仓试错"),
-    "减仓": ("reduce", "减仓"), "reduce": ("reduce", "减仓"),
-    "卖出": ("sell", "卖出"), "sell": ("sell", "卖出"),
-    "回避": ("avoid", "回避"), "avoid": ("avoid", "回避"),
-    "观察名单": ("watch", "观察名单"), "观察": ("watch", "观察名单"), "watch": ("watch", "观察名单"),
-}
 LIST_FIELDS = {"monitoring_metrics", "product_milestones", "valuation_assumptions", "invalidation_conditions", "sell_conditions", "data_conflicts", "data_sources"}
 ROW_FIELDS = {"latest_quarter_rows", "fy_comparison_rows", "segment_rows", "guidance_rows", "valuation_rows", "balance_sheet_rows", "comp_financial_rows", "customer_rows", "catalyst_rows", "business_rows", "product_rows", "chain_rows"}
 ROW_SCHEMAS = {
@@ -45,8 +35,13 @@ ROW_SCHEMAS = {
     "customer_rows": ["客户", "协议", "时间", "业务", "验证状态"],
     "catalyst_rows": ["类别", "事件", "时间", "维度"],
 }
-CLASS_FIELDS = {"action_class", "conclusion_class", "price_change_class", "ytd_class", "revenue_change_class", "eps_change_class", "business_cycle_class", "price_cycle_class", "risk_self_class", "risk_substitute_class", "risk_geo_class", "risk_cycle_class", "verify_paid_class", "verify_repeat_class", "verify_production_class", "verify_concentration_class", "verify_source_class"}
+CLASS_FIELDS = {"conclusion_class", "price_change_class", "ytd_class", "revenue_change_class", "eps_change_class", "business_cycle_class", "price_cycle_class", "risk_self_class", "risk_substitute_class", "risk_geo_class", "risk_cycle_class", "verify_paid_class", "verify_repeat_class", "verify_production_class", "verify_concentration_class", "verify_source_class"}
 UNKNOWN_DISPLAY = "未披露 / 待验证"
+PROHIBITED_ADVICE_TERMS = (
+    "目标价", "目标位", "买入价", "买入点", "入场价", "止损价", "止损位", "止盈价", "止盈位",
+    "建议仓位", "仓位建议", "仓位控制", "加仓建议", "减仓建议", "position size", "target price",
+    "entry price", "stop loss", "take profit",
+)
 SHORT_DISPLAY_FIELDS = {
     "current_price": "number", "price_change": "number", "price_change_pct": "percent",
     "market_cap": "currency", "enterprise_value": "currency", "net_debt": "currency",
@@ -90,7 +85,7 @@ FULL_RESEARCH_FIELD_GROUPS = [
         "business_cycle", "business_cycle_class", "business_cycle_desc", "price_cycle", "price_cycle_class",
         "price_cycle_desc", "catalyst_rows", "cycle_key_judgment", "next_earnings_date", "current_guidance",
         "monitoring_metrics", "product_milestones", "valuation_assumptions", "invalidation_conditions",
-        "sell_conditions", "data_conflicts", "data_sources", "action_class", "action_label", "action_rationale",
+        "sell_conditions", "data_conflicts", "data_sources",
         "conclusion_class", "one_liner", "investment_thesis", "price_implication",
     ]),
 ]
@@ -152,8 +147,6 @@ REQUIRED_FIELDS = {
     "phase_3_2_checklist.valuation": "valuation-side verdict + detail",
     "phase_3_2_checklist.failure": "failure-condition verdict + detail",
     "phase_3_3_invalidation": "list of specific invalidation conditions",
-    "phase_4_action": "buy | add | hold | wait | try | reduce | sell | avoid | watch",
-    "phase_4_rationale": "action rationale with quality gating",
     "phase_5_monitoring.next_earnings": "next earnings date",
     "phase_5_monitoring.current_quarter_guidance": "current quarter guidance",
     "phase_5_monitoring.key_metrics_next_quarter": "3-6 key metrics list",
@@ -168,8 +161,6 @@ REQUIRED_FIELDS = {
     "phase_5_monitoring.data_quality.verdict": "A+/A/A-/B+/B/B-/C/D quality verdict",
     "phase_5_monitoring.data_quality.tier_breakdown": "tier breakdown narrative",
 }
-
-VALID_ACTIONS = {"buy", "add", "hold", "wait", "try", "reduce", "sell", "avoid", "watch"}
 
 def load_env(path):
     env = {}
@@ -598,10 +589,39 @@ def compact_metric(value, metric_type):
 def compact_dashboard_display(data):
     for field, metric_type in SHORT_DISPLAY_FIELDS.items():
         data[field] = compact_metric(data.get(field), metric_type)
-    rationale = plain_display_text(data.get("action_rationale"))
-    if len(rationale) > 160:
-        rationale = rationale[:159].rstrip("，,；;。 ") + "…"
-    data["action_rationale"] = rationale or UNKNOWN_DISPLAY
+    return data
+
+
+def contains_prohibited_advice(value):
+    text = plain_display_text(value).lower()
+    return any(term.lower() in text for term in PROHIBITED_ADVICE_TERMS)
+
+
+def strip_prohibited_advice_value(value):
+    if isinstance(value, list):
+        kept = [item for item in value if not contains_prohibited_advice(item)]
+        return kept or [UNKNOWN_DISPLAY]
+    if not isinstance(value, str) or not contains_prohibited_advice(value):
+        return value
+    text = value
+    for tag in ("li", "tr", "p"):
+        text = re.sub(
+            r"(?is)<{0}[^>]*>.*?</{0}>".format(tag),
+            lambda match: "" if contains_prohibited_advice(match.group(0)) else match.group(0),
+            text,
+        )
+    if contains_prohibited_advice(text):
+        tokens = re.split(r"([。！？!?；;])", text)
+        parts = [tokens[index] + (tokens[index + 1] if index + 1 < len(tokens) else "") for index in range(0, len(tokens), 2)]
+        text = "".join(part for part in parts if not contains_prohibited_advice(part))
+    return text.strip() or UNKNOWN_DISPLAY
+
+
+def remove_prohibited_advice(data):
+    for field in ("action_class", "action_label", "action_rationale"):
+        data.pop(field, None)
+    for field, value in list(data.items()):
+        data[field] = strip_prohibited_advice_value(value)
     return data
 
 
@@ -616,8 +636,7 @@ def default_dashboard(ticker, stock_data, reason="待生成"):
         "phase_1_intent": "observe", "phase_1_horizon": "mid_term", "phase_1_security_type": "common_stock",
         "phase_1_core_question": "用户要求 ER 深度分析",
         "forward_pe": stock_data.get("fwd_pe", "未披露 / 待验证"), "ev_sales": "未披露 / 待验证", "forward_ev_sales": "未披露 / 待验证",
-        "action_class": "watch", "action_label": "观察名单", "action_rationale": reason,
-        "conclusion_class": "warn", "one_liner": f"{ticker} 已进入 ER skill 深度尽调流程；当前数据不足，先列观察名单。",
+        "conclusion_class": "warn", "one_liner": f"{ticker} 已进入 ER skill 深度研究流程；当前数据不足，部分结论待验证。",
         "company_definition": "待按 Equity Research skill Phase 2.1 补全：公司卖什么、客户是谁、行业归属和增长逻辑。",
         "investment_thesis": "待交叉验证：需要公司一手披露、SEC/IR、市场数据和行业数据共同验证。",
         "price_implication": "当前价格隐含增长尚未完成测算；不得用故事替代估值。",
@@ -648,15 +667,16 @@ def build_prompt(ticker, stock_data, compact=False, fields_override=None, stage_
     if not all(x in skill for x in ("Phase 1：定问题", "Phase 2：研究层", "Phase 3：动作层", "Phase 5：监控清单", "Hard rules")):
         raise RuntimeError("equity-research SKILL.md missing required sections")
     skill_digest = """
-你是 equity-research 完整工作流中的单阶段执行器。程序会按顺序分别完成公司概览、财务估值、业务产业链、竞对客户、周期行动监控五个阶段；你只完成当前阶段和当前字段,不要重新规划整套报告,不要输出提纲。
+你是 equity-research 完整工作流中的单阶段执行器。程序会按顺序分别完成公司概览、财务估值、业务产业链、竞对客户、周期与监控五个阶段；你只完成当前阶段和当前字段,不要重新规划整套报告,不要输出提纲。
 研究纪律:
 1. 数字只用提供的来源,必须保留日期和口径；找不到写“未披露 / 待验证”,禁止猜测。
 2. 公司一手披露/SEC > FMP/Alpha Vantage/StockAnalysis > 搜索摘要。禁止用模型记忆补数字、日期、客户协议、并购或产能事实。
 3. 单源结论标“待交叉验证”；数据冲突要列明,不强行选一个。
 4. 不写“某某等/等等/其他等”；产品、客户、业务尽量列全。
-5. 先判断真实产业链,不默认套 AI；技术面只用于择时。
+5. 先判断真实产业链,不默认套 AI。
 6. 输出应是可直接发布的正式看板内容,不是“待补充”的骨架。
 7. 直接完成字段并返回 JSON；无需展示思考过程。
+8. 本报告只用于了解公司，不提供投资建议。禁止输出目标价、买入价/买入点、止损价/止损位、止盈价/止盈位、仓位或加减仓建议。
 """.strip()
     compact_rules = """
 压缩输出规则:
@@ -691,8 +711,7 @@ JSON 格式:
 - 短展示字段只写可直接放进 KPI 卡片的短值，例如 21.1、+3.2%、$4.8B；无法核验时只写“未披露 / 待验证”。来源、口径和接口错误写入 data_sources/data_conflicts，禁止塞进短展示字段。
 - *_rows 字段只能输出 HTML <tr><td>...</td></tr> 字符串,禁止输出 <th>；每行 td 数量必须严格等于固定列定义。
 - monitoring_metrics/product_milestones/valuation_assumptions/invalidation_conditions/sell_conditions/data_conflicts/data_sources 输出 list。
-- action_class 只能是 buy/hold/wait/try/reduce/sell/avoid/watch。
-- class 字段用 pos/neg/warn 或 action class。
+- class 字段只能用 pos/neg/warn。
 - 必须真正完成当前阶段的研究和解释,不是生成提纲或索引。未找到的数据写“未披露 / 待验证”,不能编造。
 - 禁止输出“快速版未覆盖”“需要按 skill 补充”“待生成”。如果来源不足,要说明查过哪些来源及缺口。
 - 内容质量要接近正式 ER 看板,像 GLW 示例那样有业务、产品、产业链、竞对、客户验证、催化剂和监控。
@@ -895,10 +914,8 @@ def normalize_dashboard_data(ticker, stock_data, obj, reason=None):
         base["price_change_pct"] = "{:+.2f}%".format(float(stock_data.get("price_change_pct")))
     except (TypeError, ValueError):
         pass
-    action_class, action_label = ACTION_MAP.get(str(base.get("action_class") or base.get("action_label") or "watch"), ("watch", "观察名单"))
-    base["action_class"] = action_class
-    base["action_label"] = base.get("action_label") if base.get("action_label") not in ("", None, "未披露 / 待验证") else action_label
     compact_dashboard_display(base)
+    remove_prohibited_advice(base)
     for field in LIST_FIELDS:
         base[field] = list_to_li(base.get(field))
     for field in ROW_FIELDS:
@@ -917,26 +934,6 @@ def normalize_analysis(data):
 
 
 
-def enforce_action_gate(data):
-    """v2 §10.6: action quality gating."""
-    a_pct = data.get("a_pct")
-    if a_pct is None:
-        a_pct = (data.get("phase_5_monitoring", {}).get("data_quality", {}) or {}).get("a_pct")
-    current = data.get("action") or data.get("action_class", "watch")
-    if a_pct is None:
-        return current, None
-    if a_pct >= 70:
-        return current, None
-    elif a_pct >= 30:
-        if current in ("buy", "add"):
-            return "try", "Quality %s%% A: buy->try" % a_pct
-        return current, None
-    else:
-        if current not in ("watch", "avoid", "reduce", "sell"):
-            return "watch", "Quality %s%% A: force watch" % a_pct
-        return current, None
-
-
 def check_compliance(data):
     issues = []
     for field in template_placeholders():
@@ -952,6 +949,9 @@ def check_compliance(data):
     for bad in ("模型记忆", "行业常识"):
         if bad in text:
             issues.append("Unsupported evidence source: " + bad)
+    for bad in PROHIBITED_ADVICE_TERMS:
+        if bad.lower() in text.lower():
+            issues.append("Prohibited investment advice: " + bad)
     for field in ROW_SCHEMAS:
         if normalize_model_row_html(field, data.get(field)) is None:
             issues.append("Invalid row schema: " + field)
@@ -990,7 +990,7 @@ def render_markdown_report(ticker, data):
         ("监控清单", "{}\n\n{}\n\n{}".format(data.get("monitoring_metrics", ""), data.get("invalidation_conditions", ""), data.get("sell_conditions", ""))),
         ("数据来源与冲突", "{}\n\n{}".format(data.get("data_sources", ""), data.get("data_conflicts", ""))),
     ]
-    parts = ["# {} — {}".format(ticker, data.get("action_label", "观察名单")), ""]
+    parts = ["# {} — 公司研究".format(ticker), ""]
     for heading, content in sections:
         parts.extend(["## " + heading, text_from_html(content), ""])
     return "\n".join(parts).strip() + "\n"
@@ -1031,9 +1031,6 @@ def trigger(ticker, force=False):
     if err or not isinstance(obj, dict):
         raise RuntimeError("ER LLM output unusable: {}".format(err or "missing JSON object"))
     data = normalize_dashboard_data(ticker, stock_data, obj, err)
-    data["action_class"], action_note = enforce_action_gate(data)
-    if action_note:
-        data["action_rationale"] = (data.get("action_rationale", "") or "") + " | " + action_note
     issues = check_compliance(data)
     fatal_issues = [
         issue for issue in issues
@@ -1041,6 +1038,7 @@ def trigger(ticker, force=False):
         or issue.startswith("Incomplete research marker:")
         or issue.startswith("Unsupported evidence source:")
         or issue.startswith("Invalid row schema:")
+        or issue.startswith("Prohibited investment advice:")
     ]
     if fatal_issues:
         raise RuntimeError("ER full-skill quality gate failed: " + "; ".join(fatal_issues[:12]))

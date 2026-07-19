@@ -43,7 +43,7 @@
   /* ====== HEADER ====== */
   .header {
     display: grid;
-    grid-template-columns: minmax(240px, 1fr) minmax(360px, 1.25fr) minmax(300px, 1fr);
+    grid-template-columns: minmax(240px, 1fr) minmax(360px, 1fr);
     align-items: center;
     gap: 24px;
     padding: 24px 28px;
@@ -58,30 +58,11 @@
   .meta { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
   .meta span { color: var(--cyan); }
 
-  .price-block { width: 100%; min-width: 0; max-width: 560px; justify-self: center; text-align: center; padding: 0 24px; border-left: 1px solid var(--border-bright); border-right: 1px solid var(--border-bright); }
+  .price-block { width: 100%; min-width: 0; max-width: 560px; justify-self: end; text-align: center; padding: 0 24px; border-left: 1px solid var(--border-bright); }
   .price { font-size: 42px; font-weight: 700; color: var(--cyan); font-family: 'SF Mono', monospace; }
   .price-change { font-size: 14px; line-height: 1.45; margin: 4px auto 0; max-width: 520px; overflow-wrap: anywhere; font-family: 'SF Mono', monospace; }
   .price-change.pos { color: var(--green); }
   .price-change.neg { color: var(--red); }
-
-  .action-block { min-width: 0; text-align: right; justify-self: stretch; }
-  .action-badge {
-    display: inline-block;
-    font-size: 22px;
-    font-weight: 800;
-    padding: 14px 28px;
-    border-radius: 8px;
-    letter-spacing: 0.5px;
-  }
-  .action-buy { background: var(--green); color: #000; }
-  .action-hold { background: var(--cyan); color: #000; }
-  .action-wait { background: var(--yellow); color: #000; }
-  .action-try { background: var(--purple); color: #fff; }
-  .action-reduce { background: var(--orange); color: #000; }
-  .action-sell { background: var(--red); color: #fff; }
-  .action-avoid { background: var(--gray); color: #fff; }
-  .action-watch { background: var(--card-hover); color: var(--text-dim); border: 1px solid var(--border-bright); }
-  .action-rationale { font-size: 12px; line-height: 1.5; color: var(--text-dim); margin: 8px 0 0 auto; max-width: 360px; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; overflow: hidden; }
 
   /* ====== KPI CARDS ====== */
   .kpi-grid {
@@ -310,8 +291,6 @@
     .kpi-grid { grid-template-columns: repeat(3, 1fr); }
     .header { grid-template-columns: 1fr; text-align: center; }
     .price-block { border: none; padding: 16px 0; }
-    .action-block { width: 100%; text-align: center; }
-    .action-rationale { margin-left: auto; margin-right: auto; }
   }
   @media (max-width: 600px) {
     body { padding: 12px; }
@@ -319,7 +298,6 @@
     .header { gap: 16px; padding: 20px 16px; }
     .ticker { font-size: 44px; }
     .price { font-size: 36px; }
-    .action-badge { display: block; width: 100%; box-sizing: border-box; padding: 12px 14px; font-size: 18px; overflow-wrap: anywhere; }
     .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .kpi-value { font-size: 18px; }
     .tabs { overflow-x: auto; }
@@ -344,10 +322,6 @@
       <div class="price">${{current_price}}</div>
       <div class="price-change {{price_change_class}}">{{price_change_symbol}}{{price_change}} ({{price_change_pct}})</div>
       <div class="meta">Mkt Cap: {{market_cap}}</div>
-    </div>
-    <div class="action-block">
-      <div class="action-badge action-{{action_class}}">{{action_label}}</div>
-      <div class="action-rationale">{{action_rationale}}</div>
     </div>
   </div>
 
