@@ -656,6 +656,7 @@ def call_llm(ticker, stock_data, env):
             ],
             "temperature": 0.1,
             "max_tokens": max_tokens,
+            "reasoning_split": True,
         }
         req = urllib.request.Request(base_url + "/chat/completions", data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key})
         raw = urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8")
@@ -673,50 +674,53 @@ def call_llm(ticker, stock_data, env):
     total_stages = len(FULL_RESEARCH_FIELD_GROUPS)
     for stage_index, (stage_name, fields) in enumerate(FULL_RESEARCH_FIELD_GROUPS, 1):
         print("ER_STAGE {}/{} {}".format(stage_index, total_stages, stage_name), flush=True)
-        prompt_data = trim_stock_data_for_prompt(stock_data, per_source_limit=900, max_sources=24)
-        if merged["dashboard_data"]:
-            prompt_data["completed_stage_data"] = merged["dashboard_data"]
-        try:
-            prompt = build_prompt(
-                ticker,
-                prompt_data,
-                compact=False,
-                fields_override=fields,
-                stage_name=stage_name,
-            )
-            obj, err, raw_content = request_json(prompt, max_tokens=12000, timeout=300)
-            if err:
-                Path("/tmp/er-llm-last.txt").write_text(raw_content[:20000], encoding="utf-8")
-                return None, "{} JSON failed: {}".format(stage_name, err)
-            data = obj.get("dashboard_data", obj) if isinstance(obj, dict) else {}
-            if not isinstance(data, dict):
-                return None, "{} missing dashboard_data".format(stage_name)
-            missing = [field for field in fields if data.get(field) in (None, "", [], {})]
-            if missing:
-                retry_data = trim_stock_data_for_prompt(stock_data, per_source_limit=600, max_sources=24)
-                retry_data["completed_stage_data"] = dict(merged["dashboard_data"], **data)
-                retry_prompt = build_prompt(
+        chunks = [fields[index:index + 12] for index in range(0, len(fields), 12)]
+        for chunk_index, chunk in enumerate(chunks, 1):
+            print("ER_BATCH {}/{} {} {}/{}".format(stage_index, total_stages, stage_name, chunk_index, len(chunks)), flush=True)
+            prompt_data = trim_stock_data_for_prompt(stock_data, per_source_limit=900, max_sources=24)
+            if merged["dashboard_data"]:
+                prompt_data["completed_stage_data"] = merged["dashboard_data"]
+            try:
+                prompt = build_prompt(
                     ticker,
-                    retry_data,
-                    compact=True,
-                    fields_override=missing,
-                    stage_name=stage_name + "缺失字段补全",
+                    prompt_data,
+                    compact=False,
+                    fields_override=chunk,
+                    stage_name="{} ({}/{})".format(stage_name, chunk_index, len(chunks)),
                 )
-                retry_obj, retry_err, retry_raw = request_json(retry_prompt, max_tokens=12000, timeout=300)
-                if retry_err:
-                    Path("/tmp/er-llm-last.txt").write_text(retry_raw[:20000], encoding="utf-8")
-                    return None, "{} incomplete and retry failed: {}".format(stage_name, retry_err)
-                retry_values = retry_obj.get("dashboard_data", retry_obj) if isinstance(retry_obj, dict) else {}
-                if isinstance(retry_values, dict):
-                    data.update(retry_values)
-                missing = [field for field in fields if data.get(field) in (None, "", [], {})]
+                obj, err, raw_content = request_json(prompt, max_tokens=9000, timeout=300)
+                if err:
+                    Path("/tmp/er-llm-last.txt").write_text(raw_content[:20000], encoding="utf-8")
+                    return None, "{} batch {}/{} JSON failed: {}".format(stage_name, chunk_index, len(chunks), err)
+                data = obj.get("dashboard_data", obj) if isinstance(obj, dict) else {}
+                if not isinstance(data, dict):
+                    return None, "{} batch {}/{} missing dashboard_data".format(stage_name, chunk_index, len(chunks))
+                missing = [field for field in chunk if data.get(field) in (None, "", [], {})]
                 if missing:
-                    return None, "{} still missing fields: {}".format(stage_name, ",".join(missing))
-            merged["dashboard_data"].update({field: data[field] for field in fields})
-        except urllib.error.HTTPError as e:
-            return None, "{} HTTP {}: {}".format(stage_name, e.code, e.read().decode("utf-8", errors="ignore")[:300])
-        except Exception as e:
-            return None, "{} request failed: {}".format(stage_name, str(e)[:300])
+                    retry_data = trim_stock_data_for_prompt(stock_data, per_source_limit=600, max_sources=24)
+                    retry_data["completed_stage_data"] = dict(merged["dashboard_data"], **data)
+                    retry_prompt = build_prompt(
+                        ticker,
+                        retry_data,
+                        compact=True,
+                        fields_override=missing,
+                        stage_name=stage_name + "缺失字段补全",
+                    )
+                    retry_obj, retry_err, retry_raw = request_json(retry_prompt, max_tokens=7000, timeout=300)
+                    if retry_err:
+                        Path("/tmp/er-llm-last.txt").write_text(retry_raw[:20000], encoding="utf-8")
+                        return None, "{} incomplete and retry failed: {}".format(stage_name, retry_err)
+                    retry_values = retry_obj.get("dashboard_data", retry_obj) if isinstance(retry_obj, dict) else {}
+                    if isinstance(retry_values, dict):
+                        data.update(retry_values)
+                    missing = [field for field in chunk if data.get(field) in (None, "", [], {})]
+                    if missing:
+                        return None, "{} still missing fields: {}".format(stage_name, ",".join(missing))
+                merged["dashboard_data"].update({field: data[field] for field in chunk})
+            except urllib.error.HTTPError as e:
+                return None, "{} HTTP {}: {}".format(stage_name, e.code, e.read().decode("utf-8", errors="ignore")[:300])
+            except Exception as e:
+                return None, "{} request failed: {}".format(stage_name, str(e)[:300])
     return merged, None
 
 

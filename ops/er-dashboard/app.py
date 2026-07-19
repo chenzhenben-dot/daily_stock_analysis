@@ -136,27 +136,45 @@ def run_er_job(job_id):
     log_job(job_id, "running", "ER skill started")
     try:
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [sys.executable, TRIGGER_SCRIPT, ticker, "--force"],
                 cwd="/opt/er-dashboard",
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=ER_JOB_TIMEOUT_SECONDS,
+                stderr=subprocess.STDOUT,
                 universal_newlines=True,
+                bufsize=1,
             )
-        except subprocess.TimeoutExpired:
-            message = "{} 分析超过 {} 秒,请稍后重试或查看服务器日志。".format(ticker, ER_JOB_TIMEOUT_SECONDS)
-            update_job(job_id, status="failed", message="ER 分析超时", error=message)
-            log_job(job_id, "failed", message)
-            return
+            output_lines = []
+            started_at = time.time()
+            for line in iter(process.stdout.readline, ""):
+                line = line.rstrip()
+                if line:
+                    output_lines.append(line)
+                if line.startswith("ER_STAGE "):
+                    parts = line.split(" ", 2)
+                    detail = parts[2] if len(parts) > 2 else line
+                    update_job(job_id, message="正在完整执行 ER skill：" + detail)
+                elif line.startswith("ER_BATCH "):
+                    parts = line.split(" ", 3)
+                    detail = parts[2] if len(parts) > 2 else line
+                    progress = parts[3] if len(parts) > 3 else ""
+                    update_job(job_id, message="正在研究：{} {}".format(detail, progress))
+                if time.time() - started_at > ER_JOB_TIMEOUT_SECONDS:
+                    process.terminate()
+                    message = "{} 分析超过 {} 秒,请稍后重试或查看服务器日志。".format(ticker, ER_JOB_TIMEOUT_SECONDS)
+                    update_job(job_id, status="failed", message="ER 分析超时", error=message)
+                    log_job(job_id, "failed", message)
+                    return
+            returncode = process.wait()
+            combined_output = "\n".join(output_lines)
         except Exception as exc:
             message = str(exc)[:1200]
             update_job(job_id, status="failed", message="ER 分析启动失败", error=message)
             log_job(job_id, "failed", message)
             return
 
-        if result.returncode != 0:
-            msg = (result.stderr or result.stdout or "unknown error")[-4000:]
+        if returncode != 0:
+            msg = (combined_output or "unknown error")[-4000:]
             update_job(job_id, status="failed", message="ER 分析失败", error=msg)
             log_job(job_id, "failed", msg)
             return
@@ -173,8 +191,8 @@ def run_er_job(job_id):
             status="completed",
             message="分析完成,正在打开最新报告",
             url="/" + latest_fn,
-            stdout=(result.stdout or "")[-1200:],
-            stderr=(result.stderr or "")[-1200:],
+            stdout=combined_output[-1200:],
+            stderr="",
         )
         log_job(job_id, "completed", latest_fn)
     finally:
