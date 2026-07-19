@@ -551,14 +551,15 @@ def build_prompt(ticker, stock_data, compact=False, fields_override=None, stage_
     if not all(x in skill for x in ("Phase 1：定问题", "Phase 2：研究层", "Phase 3：动作层", "Phase 5：监控清单", "Hard rules")):
         raise RuntimeError("equity-research SKILL.md missing required sections")
     skill_digest = """
-完整执行 equity-research SKILL.md,重点不是摘要,而是生成正式 ER HTML 看板。
-Phase 1：定问题 — 默认 observe / mid_term / common_stock / 用户要求 ER 深度分析。
-Phase 2：研究层 — 2.1 公司定义,2.2 收入结构,2.3 产品/客户为什么付钱,2.4 产品完整性,2.5 产业链,2.6 客户验证,2.7 竞对,2.8 财务,2.9 估值,2.10 四类催化剂。
-Phase 3：动作层 — 周期位置 + 买入前事实清单 + 失效条件 + 技术面只做择时。
-Phase 4：必须给动作标签:可以买/加仓、持有、等待回调、小仓试错、减仓、卖出、回避、观察名单。
-Phase 5：监控清单 7 项:下一次财报、当前指引、3-6个关键指标、产品/订单节点、估值假设、买入逻辑失效、卖出/减仓条件。
-Hard rules:不写某某等/等等/其他;不默认套 AI;数字必须可溯源,找不到写未披露/待验证;单源结论标注待交叉验证;催化剂写完整句子;必须包含 V3 纪律视角。
-Output HTML 看板使用官方 7 tab 模板:概览、财务估值、业务 & 产品、产业链、竞对、客户验证、周期催化、监控。
+你是 equity-research 完整工作流中的单阶段执行器。程序会按顺序分别完成公司概览、财务估值、业务产业链、竞对客户、周期行动监控五个阶段；你只完成当前阶段和当前字段,不要重新规划整套报告,不要输出提纲。
+研究纪律:
+1. 数字只用提供的来源,必须保留日期和口径；找不到写“未披露 / 待验证”,禁止猜测。
+2. 公司一手披露/SEC > FMP/Alpha Vantage/StockAnalysis > 搜索摘要 > 模型记忆。
+3. 单源结论标“待交叉验证”；数据冲突要列明,不强行选一个。
+4. 不写“某某等/等等/其他等”；产品、客户、业务尽量列全。
+5. 先判断真实产业链,不默认套 AI；技术面只用于择时。
+6. 输出应是可直接发布的正式看板内容,不是“待补充”的骨架。
+7. 直接完成字段并返回 JSON；无需展示思考过程。
 """.strip()
     compact_rules = """
 压缩输出规则:
@@ -568,14 +569,7 @@ Output HTML 看板使用官方 7 tab 模板:概览、财务估值、业务 & 产
 - 不要输出 markdown_report,不要输出长篇解释。
 """.strip() if compact else ""
 
-    hard_rules_start = skill.find("## Hard rules")
-    hard_rules = skill[hard_rules_start:hard_rules_start + 7000] if hard_rules_start >= 0 else ""
     return f"""{skill_digest}
-
-以下是本次必须实际遵守的 equity-research Hard rules 原文：
-<hard_rules>
-{hard_rules}
-</hard_rules>
 
 股票: {ticker}
 当前研究阶段: {stage_name}
