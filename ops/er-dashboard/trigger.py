@@ -582,9 +582,11 @@ def build_prompt(ticker, stock_data, compact=False, fields_override=None, stage_
 {json.dumps(fields, ensure_ascii=False)}
 
 JSON 格式:
-{{"dashboard_data":{{...全部模板字段...}},"brief_summary":"300字以内总结","compliance_notes":["待交叉验证/未披露说明"]}}
+{{"dashboard_data":{{...仅包含本批明确列出的模板字段...}}}}
 
 字段规则:
+- dashboard_data 只能包含本批明确列出的字段,禁止添加任何额外字段。
+- 普通文本字段控制在 60-160 个中文字符；表格每个单元格保持简洁。
 - *_rows 字段输出 HTML <tr><td>...</td></tr> 字符串。
 - monitoring_metrics/product_milestones/valuation_assumptions/invalidation_conditions/sell_conditions/data_conflicts/data_sources 输出 list。
 - action_class 只能是 buy/hold/wait/try/reduce/sell/avoid/watch。
@@ -608,6 +610,7 @@ def call_llm(ticker, stock_data, env):
         return None, "no API key"
 
     def extract_json(content):
+        original_content = content
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         start = content.find("{")
         if start < 0:
@@ -635,7 +638,35 @@ def call_llm(ticker, stock_data, env):
                         end = i + 1
                         break
         if end < 0:
-            return None, "unbalanced JSON object in model content", content
+            comma_positions = []
+            depth = 0
+            in_str = False
+            esc = False
+            for i, ch in enumerate(content[start:], start):
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                else:
+                    if ch == '"':
+                        in_str = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                    elif ch == "," and depth == 2:
+                        comma_positions.append(i)
+            for comma_at in reversed(comma_positions):
+                try:
+                    repaired = json.loads(content[start:comma_at] + "}}")
+                    if isinstance(repaired, dict) and isinstance(repaired.get("dashboard_data"), dict):
+                        return repaired, None, original_content
+                except Exception:
+                    continue
+            return None, "unbalanced JSON object in model content", original_content
         try:
             return json.loads(content[start:end]), None, content
         except Exception as parse_err:
@@ -678,7 +709,7 @@ def call_llm(ticker, stock_data, env):
                 prompt = build_prompt(
                     ticker,
                     prompt_data,
-                    compact=False,
+                    compact=True,
                     fields_override=chunk,
                     stage_name="{} ({}/{})".format(stage_name, chunk_index, len(chunks)),
                 )
