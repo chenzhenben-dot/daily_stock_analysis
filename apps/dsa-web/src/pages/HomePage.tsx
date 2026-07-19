@@ -720,10 +720,18 @@ const HomePage: React.FC = () => {
                 />
               </div>
               <a
-                href={query.trim() ? `${ER_DASHBOARD_BASE_URL}/trigger/${encodeURIComponent(query.trim().toUpperCase())}` : ER_DASHBOARD_BASE_URL}
+                href={query.trim() ? `${ER_DASHBOARD_BASE_URL}/trigger/${encodeURIComponent(query.trim().toUpperCase())}` : undefined}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex h-10 flex-shrink-0 items-center gap-1.5 rounded-xl border border-primary/40 bg-primary/10 px-3.5 text-sm font-semibold text-primary transition-colors hover:border-primary/70 hover:bg-primary/15"
+                aria-disabled={!query.trim()}
+                onClick={(event) => {
+                  if (!query.trim()) event.preventDefault();
+                }}
+                className={`inline-flex h-10 flex-shrink-0 items-center gap-1.5 rounded-xl border border-primary/40 bg-primary/10 px-3.5 text-sm font-semibold text-primary transition-colors ${
+                  query.trim()
+                    ? 'hover:border-primary/70 hover:bg-primary/15'
+                    : 'cursor-not-allowed opacity-45'
+                }`}
                 aria-label={t('home.erReport', { code: query.trim() || 'ER' })}
                 data-testid="home-er-button"
               >
