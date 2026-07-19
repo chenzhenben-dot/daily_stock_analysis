@@ -46,6 +46,16 @@ ROW_SCHEMAS = {
     "catalyst_rows": ["类别", "事件", "时间", "维度"],
 }
 CLASS_FIELDS = {"action_class", "conclusion_class", "price_change_class", "ytd_class", "revenue_change_class", "eps_change_class", "business_cycle_class", "price_cycle_class", "risk_self_class", "risk_substitute_class", "risk_geo_class", "risk_cycle_class", "verify_paid_class", "verify_repeat_class", "verify_production_class", "verify_concentration_class", "verify_source_class"}
+UNKNOWN_DISPLAY = "未披露 / 待验证"
+SHORT_DISPLAY_FIELDS = {
+    "current_price": "number", "price_change": "number", "price_change_pct": "percent",
+    "market_cap": "currency", "enterprise_value": "currency", "net_debt": "currency",
+    "week52_high": "number", "week52_low": "number", "ytd_return": "percent",
+    "forward_pe": "multiple", "pe_median": "multiple", "ev_sales": "multiple",
+    "forward_ev_sales": "multiple", "core_revenue_growth": "percent",
+    "core_gross_margin": "percent", "margin_change": "number", "fcf_ttm": "currency",
+    "fcf_yield": "percent",
+}
 
 FULL_RESEARCH_FIELD_GROUPS = [
     ("公司概览与投资问题", [
@@ -358,10 +368,16 @@ def add_fmp_sources(ticker, out):
                 profile = data[0]
                 for source_key, target_key in (
                     ("price", "price"), ("mktCap", "market_cap"), ("companyName", "company_name"),
-                    ("exchange", "exchange"), ("industry", "industry"),
+                    ("exchange", "exchange"), ("industry", "industry"), ("change", "price_change"),
+                    ("changePercentage", "price_change_pct"),
                 ):
                     if profile.get(source_key) not in (None, ""):
                         out[target_key] = profile[source_key]
+                price_range = str(profile.get("range") or "")
+                range_match = re.fullmatch(r"\s*([\d,.]+)\s*-\s*([\d,.]+)\s*", price_range)
+                if range_match:
+                    out["wk52_low"] = range_match.group(1).replace(",", "")
+                    out["wk52_high"] = range_match.group(2).replace(",", "")
             elif isinstance(data, list) and data:
                 statement_success += 1
         except Exception as exc:
@@ -555,6 +571,40 @@ def clean_model_field(field, value):
     return value
 
 
+def plain_display_text(value):
+    text = re.sub(r"(?s)<[^>]+>", " ", html.unescape(str(value or "")))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def compact_metric(value, metric_type):
+    text = plain_display_text(value)
+    if not text:
+        return UNKNOWN_DISPLAY
+    unknown_markers = ("未披露", "待验证", "未抓取", "无法获取", "接口 402", "接口402", "请求失败")
+    if any(marker in text for marker in unknown_markers):
+        return UNKNOWN_DISPLAY
+    if len(text) <= 24:
+        return text
+    patterns = {
+        "percent": r"[+\-]?\d+(?:\.\d+)?\s*%",
+        "currency": r"[$¥€]\s*[\d,.]+(?:\s*(?:T|B|M|K|万亿|亿|万))?",
+        "multiple": r"[+\-]?\d+(?:\.\d+)?\s*[xX倍]",
+        "number": r"^[+\-]?[\d,.]+(?:\.\d+)?",
+    }
+    match = re.search(patterns[metric_type], text)
+    return re.sub(r"\s+", "", match.group(0)) if match else UNKNOWN_DISPLAY
+
+
+def compact_dashboard_display(data):
+    for field, metric_type in SHORT_DISPLAY_FIELDS.items():
+        data[field] = compact_metric(data.get(field), metric_type)
+    rationale = plain_display_text(data.get("action_rationale"))
+    if len(rationale) > 160:
+        rationale = rationale[:159].rstrip("，,；;。 ") + "…"
+    data["action_rationale"] = rationale or UNKNOWN_DISPLAY
+    return data
+
+
 def default_dashboard(ticker, stock_data, reason="待生成"):
     today = time.strftime("%Y-%m-%d")
     analysis_timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -591,6 +641,7 @@ def default_dashboard(ticker, stock_data, reason="待生成"):
 def build_prompt(ticker, stock_data, compact=False, fields_override=None, stage_name="完整研究"):
     fields = fields_override or template_placeholders()
     row_schemas = {field: ROW_SCHEMAS[field] for field in fields if field in ROW_SCHEMAS}
+    short_fields = {field: SHORT_DISPLAY_FIELDS[field] for field in fields if field in SHORT_DISPLAY_FIELDS}
     today = time.strftime("%Y-%m-%d")
     analysis_timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     skill = SKILL_PATH.read_text(encoding="utf-8")
@@ -628,6 +679,8 @@ def build_prompt(ticker, stock_data, compact=False, fields_override=None, stage_
 {json.dumps(fields, ensure_ascii=False)}
 本批表格字段的固定列定义:
 {json.dumps(row_schemas, ensure_ascii=False)}
+本批短展示字段（只能返回一个数值/百分比/倍数，不得附加来源说明或错误原因）:
+{json.dumps(short_fields, ensure_ascii=False)}
 
 JSON 格式:
 {{"dashboard_data":{{...仅包含本批明确列出的模板字段...}}}}
@@ -635,6 +688,7 @@ JSON 格式:
 字段规则:
 - dashboard_data 只能包含本批明确列出的字段,禁止添加任何额外字段。
 - 普通文本字段控制在 60-160 个中文字符；表格每个单元格保持简洁。
+- 短展示字段只写可直接放进 KPI 卡片的短值，例如 21.1、+3.2%、$4.8B；无法核验时只写“未披露 / 待验证”。来源、口径和接口错误写入 data_sources/data_conflicts，禁止塞进短展示字段。
 - *_rows 字段只能输出 HTML <tr><td>...</td></tr> 字符串,禁止输出 <th>；每行 td 数量必须严格等于固定列定义。
 - monitoring_metrics/product_milestones/valuation_assumptions/invalidation_conditions/sell_conditions/data_conflicts/data_sources 输出 list。
 - action_class 只能是 buy/hold/wait/try/reduce/sell/avoid/watch。
@@ -813,6 +867,7 @@ def normalize_dashboard_data(ticker, stock_data, obj, reason=None):
         ("company_name", "company_name"), ("exchange", "exchange"), ("industry", "industry"),
         ("price", "current_price"), ("fwd_pe", "forward_pe"),
         ("wk52_high", "week52_high"), ("wk52_low", "week52_low"),
+        ("price_change", "price_change"), ("price_change_pct", "price_change_pct"),
     ):
         if stock_data.get(source_key) not in (None, ""):
             base[target_key] = str(stock_data[source_key])
@@ -829,9 +884,21 @@ def normalize_dashboard_data(ticker, stock_data, obj, reason=None):
         except (TypeError, ValueError):
             pass
         base["market_cap"] = str(market_cap)
+    try:
+        change = float(stock_data.get("price_change"))
+        base["price_change"] = "{:+.2f}".format(change)
+        base["price_change_symbol"] = "▲" if change > 0 else "▼" if change < 0 else ""
+        base["price_change_class"] = "pos" if change > 0 else "neg" if change < 0 else ""
+    except (TypeError, ValueError):
+        pass
+    try:
+        base["price_change_pct"] = "{:+.2f}%".format(float(stock_data.get("price_change_pct")))
+    except (TypeError, ValueError):
+        pass
     action_class, action_label = ACTION_MAP.get(str(base.get("action_class") or base.get("action_label") or "watch"), ("watch", "观察名单"))
     base["action_class"] = action_class
     base["action_label"] = base.get("action_label") if base.get("action_label") not in ("", None, "未披露 / 待验证") else action_label
+    compact_dashboard_display(base)
     for field in LIST_FIELDS:
         base[field] = list_to_li(base.get(field))
     for field in ROW_FIELDS:
