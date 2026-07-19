@@ -2153,6 +2153,77 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         self.assertEqual(resolved, 3)
         self.assertEqual(service.news_window_days, 99)
 
+    def test_direct_only_admission_drops_unrelated_sector_fillers(self) -> None:
+        service, _ = self._create_service_with_mock_provider()
+        response = _response([
+            SearchResult(
+                title="Disney analyst ratings",
+                snippet="Unrelated media company",
+                url="https://example.com/disney",
+                source="example.com",
+                published_date=datetime.now().date().isoformat(),
+                relevance_score=6,
+                relevance_category="sector_related_news",
+            ),
+            SearchResult(
+                title="闪迪 SNDK 发布财报",
+                snippet="闪迪公布季度业绩",
+                url="https://example.com/sndk",
+                source="example.com",
+                published_date=datetime.now().date().isoformat(),
+                relevance_score=80,
+                relevance_category="direct_company_news",
+            ),
+        ])
+
+        filtered = service._filter_ranked_news_for_context(
+            response,
+            log_scope="SNDK:test",
+            require_direct=True,
+        )
+
+        self.assertEqual([item.title for item in filtered.results], ["闪迪 SNDK 发布财报"])
+
+    def test_history_persistence_keeps_only_fresh_direct_company_news(self) -> None:
+        today = datetime.now().date()
+        service, _ = self._create_service_with_mock_provider(
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        response = _response([
+            SearchResult(
+                title="闪迪 SNDK 今日公告",
+                snippet="fresh",
+                url="https://example.com/sndk-fresh",
+                source="example.com",
+                published_date=today.isoformat(),
+                relevance_score=80,
+                relevance_category="direct_company_news",
+            ),
+            SearchResult(
+                title="闪迪旧财报",
+                snippet="old",
+                url="https://example.com/sndk-old",
+                source="example.com",
+                published_date=(today - timedelta(days=10)).isoformat(),
+                relevance_score=80,
+                relevance_category="direct_company_news",
+            ),
+            SearchResult(
+                title="Cintas price target",
+                snippet="unrelated",
+                url="https://example.com/ctas",
+                source="example.com",
+                published_date=today.isoformat(),
+                relevance_score=5,
+                relevance_category="sector_related_news",
+            ),
+        ])
+
+        filtered = service.prepare_news_for_persistence(response)
+
+        self.assertEqual([item.title for item in filtered.results], ["闪迪 SNDK 今日公告"])
+
     def test_unix_timestamp_normalizes_to_local_date(self) -> None:
         """Unix timestamp should be converted to local date before window filtering."""
         dt_utc = datetime(2026, 3, 15, 23, 30, tzinfo=timezone.utc)

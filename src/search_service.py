@@ -3158,6 +3158,7 @@ class SearchService:
         response: SearchResponse,
         *,
         log_scope: str,
+        require_direct: bool = False,
     ) -> SearchResponse:
         """Drop obvious non-news pages and zero-relevance fillers from ranked results."""
         if not response.success or not response.results:
@@ -3188,11 +3189,14 @@ class SearchService:
             item
             for item in candidates
             if item.relevance_category == cls._DIRECT_NEWS_CATEGORY
-            or (item.relevance_score or 0) > 0
+            or (not require_direct and (item.relevance_score or 0) > 0)
         ]
         if meaningful_candidates:
             dropped_zero_relevance = len(candidates) - len(meaningful_candidates)
             filtered_results = meaningful_candidates
+        elif require_direct:
+            dropped_zero_relevance = len(candidates)
+            filtered_results = []
         else:
             filtered_results = candidates
 
@@ -3216,6 +3220,34 @@ class SearchService:
             success=response.success,
             error_message=response.error_message,
             search_time=response.search_time,
+        )
+
+    def prepare_news_for_persistence(
+        self,
+        response: SearchResponse,
+        *,
+        max_results: int = 20,
+    ) -> SearchResponse:
+        """Keep only fresh, directly attributable company news for history UI."""
+        if not response.success or not response.results:
+            return response
+        direct_response = SearchResponse(
+            query=response.query,
+            results=[
+                item
+                for item in response.results
+                if item.relevance_category == self._DIRECT_NEWS_CATEGORY
+            ],
+            provider=response.provider,
+            success=response.success,
+            error_message=response.error_message,
+            search_time=response.search_time,
+        )
+        return self._filter_news_response(
+            direct_response,
+            search_days=self._effective_news_window_days(),
+            max_results=max_results,
+            log_scope=f"{response.provider}:history_persistence",
         )
 
     @classmethod

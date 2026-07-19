@@ -580,6 +580,11 @@ class StockAnalysisPipeline:
                         query_context = self._build_query_context(query_id=query_id)
                         for dim_name, response in intel_results.items():
                             if response and response.success and response.results:
+                                response = self.search_service.prepare_news_for_persistence(
+                                    response,
+                                    max_results=20,
+                                )
+                            if response and response.success and response.results:
                                 self.db.save_news_intel(
                                     code=code,
                                     name=stock_name,
