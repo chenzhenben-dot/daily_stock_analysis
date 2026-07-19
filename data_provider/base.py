@@ -23,6 +23,7 @@ from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Callable, Optional, List, Tuple, Dict, Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import numpy as np
@@ -68,6 +69,11 @@ def summarize_exception(exc: Exception) -> Tuple[str, str]:
     root = unwrap_exception(exc)
     error_type = type(root).__name__
     message = str(exc).strip() or str(root).strip() or error_type
+    try:
+        from src.utils.sanitize import sanitize_diagnostic_text
+        message = sanitize_diagnostic_text(message, max_length=500) or error_type
+    except Exception:
+        pass
     return error_type, " ".join(message.split())
 
 
@@ -1786,6 +1792,7 @@ class DataFetcherManager:
         if fetcher_name == "AkshareFetcher" and kw.get("source") == "hk":
             return "akshare_hk"
         mapping = {
+            "MoomooFetcher": "moomoo",
             "LongbridgeFetcher": "longbridge",
             "YfinanceFetcher": "yfinance",
             "AkshareFetcher": "akshare",
@@ -1825,6 +1832,23 @@ class DataFetcherManager:
         fetched_dt = self._parse_realtime_timestamp(fetched_at) or datetime.now(timezone.utc)
         stale_seconds = max(0, int((fetched_dt - provider_dt).total_seconds()))
         ttl = realtime_cache_ttl if realtime_cache_ttl is not None else 600
+        # A provider's last-trade timestamp legitimately stops advancing when
+        # the market is closed. Keep the strict TTL during trading sessions,
+        # but allow the latest completed session through overnight/weekends.
+        market = str(getattr(quote, "market", "") or "").lower()
+        if market in {"us", "hk"}:
+            timezone_name = "America/New_York" if market == "us" else "Asia/Hong_Kong"
+            local_now = fetched_dt.astimezone(ZoneInfo(timezone_name))
+            weekday = local_now.weekday()
+            minutes = local_now.hour * 60 + local_now.minute
+            if weekday >= 5 or (weekday == 0 and minutes < 570):
+                ttl = max(int(ttl), 72 * 60 * 60)
+            elif market == "us" and (minutes < 240 or minutes > 1215):
+                ttl = max(int(ttl), 18 * 60 * 60)
+            elif market == "hk" and (minutes < 570 or minutes > 975):
+                ttl = max(int(ttl), 18 * 60 * 60)
+            elif market == "hk" and 720 <= minutes < 780:
+                ttl = max(int(ttl), 2 * 60 * 60)
         setattr(quote, "stale_seconds", stale_seconds)
         setattr(quote, "is_stale", stale_seconds > int(ttl))
         return quote
@@ -1893,26 +1917,46 @@ class DataFetcherManager:
         if is_us or is_hk:
             prefer_lb = self._longbridge_preferred() and not is_us_index
             if is_us:
-                primary_src = "LongbridgeFetcher" if prefer_lb else "YfinanceFetcher"
-                secondary_src = "YfinanceFetcher" if prefer_lb else "LongbridgeFetcher"
                 market_label = "美股指数" if is_us_index else "美股"
-                primary_kw: dict = {}
-                secondary_kw: dict = {}
+                fallback_chain = (
+                    [("LongbridgeFetcher", {}), ("YfinanceFetcher", {})]
+                    if prefer_lb
+                    else [("YfinanceFetcher", {}), ("LongbridgeFetcher", {})]
+                )
             else:
-                primary_src = "LongbridgeFetcher" if prefer_lb else "AkshareFetcher"
-                secondary_src = "AkshareFetcher" if prefer_lb else "LongbridgeFetcher"
                 market_label = "港股"
-                primary_kw = {"source": "hk"} if primary_src == "AkshareFetcher" else {}
-                secondary_kw = {"source": "hk"} if secondary_src == "AkshareFetcher" else {}
+                fallback_chain = (
+                    [("LongbridgeFetcher", {}), ("AkshareFetcher", {"source": "hk"})]
+                    if prefer_lb
+                    else [("AkshareFetcher", {"source": "hk"}), ("LongbridgeFetcher", {})]
+                )
 
-            primary_token = self._realtime_fetcher_token(primary_src, **primary_kw)
-            primary_quote = self._try_fetcher_quote(stock_code, primary_src, **primary_kw)
-            fallback_from = primary_token if primary_quote is None else None
+            # Moomoo is the preferred live source for US/HK stocks when its
+            # OpenD tunnel is healthy. Indices remain on YFinance because
+            # Moomoo OpenD does not serve those snapshots.
+            source_chain = fallback_chain if is_us_index else [("MoomooFetcher", {}), *fallback_chain]
+            primary_quote = None
+            primary_index = -1
+            failed_tokens: List[str] = []
+            for source_index, (source_name, source_kw) in enumerate(source_chain):
+                candidate = self._try_fetcher_quote(stock_code, source_name, **source_kw)
+                if candidate is not None:
+                    primary_quote = candidate
+                    primary_index = source_index
+                    logger.info(
+                        f"[实时行情] {market_label} {stock_code} 成功获取 (来源: {source_name})"
+                    )
+                    break
+                failed_tokens.append(self._realtime_fetcher_token(source_name, **source_kw))
+
+            fallback_from = failed_tokens[0] if failed_tokens and primary_quote is not None else None
             if primary_quote is not None:
-                logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: {primary_src})")
-            primary_quote = self._supplement_quote(
-                stock_code, primary_quote, secondary_src, **secondary_kw,
-            )
+                for source_name, source_kw in source_chain[primary_index + 1:]:
+                    primary_quote = self._supplement_quote(
+                        stock_code, primary_quote, source_name, **source_kw,
+                    )
+                    if not self._quote_needs_supplement(primary_quote):
+                        break
             # 美股个股（非指数）尝试从 Finnhub/AlphaVantage 补充缺失字段
             if is_us and not is_us_index and primary_quote is not None:
                 for extra_src in ["FinnhubFetcher", "AlphaVantageFetcher"]:

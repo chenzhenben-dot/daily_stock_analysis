@@ -169,6 +169,21 @@ class TestAnspireSearchProvider(unittest.TestCase):
         # 无 API Key 时不可用
         provider_without_keys = AnspireSearchProvider([])
         self.assertFalse(provider_without_keys.is_available)
+
+    @patch('src.search_service.time.time')
+    def test_provider_enters_cooldown_after_repeated_key_errors(self, mock_time):
+        mock_time.return_value = 1000.0
+        provider = AnspireSearchProvider(["key1"])
+        provider._record_error("key1")
+        provider._record_error("key1")
+        provider._record_error("key1")
+
+        self.assertIsNone(provider._get_next_key())
+        self.assertFalse(provider.is_available)
+
+        mock_time.return_value = 1301.0
+        self.assertTrue(provider.is_available)
+        self.assertEqual("key1", provider._get_next_key())
     
     def test_extract_domain(self):
         """测试域名提取功能"""

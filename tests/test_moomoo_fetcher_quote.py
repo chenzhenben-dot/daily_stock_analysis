@@ -5,6 +5,7 @@ import unittest
 import pandas as pd
 
 from data_provider.moomoo_fetcher import MoomooFetcher, RET_OK
+from data_provider.realtime_types import RealtimeSource
 
 
 class _SnapshotContext:
@@ -18,9 +19,8 @@ class _SnapshotContext:
                 {
                     "code": "US.GRAB",
                     "name": "Grab Holdings",
+                    "update_time": "2026-07-17 20:01:23.601",
                     "last_price": 3.80,
-                    "change_rate": 1.60,
-                    "change_val": 0.06,
                     "volume": 12_345_678,
                     "turnover_rate": 0.42,
                     "open_price": 3.76,
@@ -52,8 +52,14 @@ class MoomooRealtimeQuoteTest(unittest.TestCase):
         self.assertEqual(["US.GRAB"], context.snapshot_codes)
         self.assertIsNotNone(quote)
         self.assertEqual("Grab Holdings", quote.name)
+        self.assertEqual(RealtimeSource.MOOMOO, quote.source)
         self.assertEqual(3.80, quote.price)
-        self.assertEqual(1.60, quote.change_pct)
+        self.assertAlmostEqual(1.604278, quote.change_pct, places=5)
+        self.assertAlmostEqual(0.06, quote.change_amount, places=6)
+        self.assertEqual("2026-07-17T20:01:23.601000-04:00", quote.provider_timestamp)
+        self.assertEqual("us", quote.market)
+        self.assertEqual("USD", quote.currency)
+        self.assertIsInstance(quote.volume, int)
         self.assertEqual(15_542_000_000, quote.total_mv)
         self.assertEqual(10_122_190_701, quote.circ_mv)
 

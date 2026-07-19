@@ -31,6 +31,7 @@ import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -498,14 +499,49 @@ class MoomooFetcher(BaseFetcher):
         if len(data) == 0:
             return None
         row = data.iloc[0]
+        price = safe_float(row.get("last_price"))
+        pre_close = safe_float(row.get("prev_close_price"))
+        change_amount = safe_float(row.get("change_val"))
+        if change_amount is None and price is not None and pre_close is not None:
+            change_amount = price - pre_close
+        change_pct = safe_float(row.get("change_rate"))
+        if change_pct is None and change_amount is not None and pre_close not in (None, 0):
+            change_pct = change_amount / pre_close * 100
+
+        provider_timestamp = None
+        update_time = str(row.get("update_time") or "").strip()
+        if update_time and update_time not in {"-", "--", "N/A"}:
+            try:
+                market_prefix = futu_code.split(".", 1)[0].upper()
+                market_timezone = {
+                    "US": "America/New_York",
+                    "HK": "Asia/Hong_Kong",
+                    "SH": "Asia/Shanghai",
+                    "SZ": "Asia/Shanghai",
+                }.get(market_prefix, "UTC")
+                provider_timestamp = (
+                    datetime.fromisoformat(update_time)
+                    .replace(tzinfo=ZoneInfo(market_timezone))
+                    .isoformat()
+                )
+            except (ValueError, TypeError):
+                logger.debug("[Moomoo] invalid snapshot update_time: %r", update_time)
+
+        market_prefix = futu_code.split(".", 1)[0].upper()
+        market = {"US": "us", "HK": "hk", "SH": "cn", "SZ": "cn"}.get(market_prefix)
+        currency = {"US": "USD", "HK": "HKD", "SH": "CNY", "SZ": "CNY"}.get(market_prefix)
+
         return UnifiedRealtimeQuote(
             code=stock_code,
-            source=RealtimeSource.LONGBRIDGE,  # closest enum slot (US/HK data)
+            source=RealtimeSource.MOOMOO,
             name=str(row.get("name") or ""),
-            price=safe_float(row.get("last_price")),
-            change_pct=safe_float(row.get("change_rate")),
-            change_amount=safe_float(row.get("change_val")),
-            volume=safe_float(row.get("volume")),
+            provider_timestamp=provider_timestamp,
+            market=market,
+            currency=currency,
+            price=price,
+            change_pct=change_pct,
+            change_amount=change_amount,
+            volume=int(volume) if (volume := safe_float(row.get("volume"))) is not None else None,
             amount=None,
             volume_ratio=None,
             turnover_rate=safe_float(row.get("turnover_rate")),
@@ -513,7 +549,7 @@ class MoomooFetcher(BaseFetcher):
             open_price=safe_float(row.get("open_price")),
             high=safe_float(row.get("high_price")),
             low=safe_float(row.get("low_price")),
-            pre_close=safe_float(row.get("prev_close_price")),
+            pre_close=pre_close,
             pe_ratio=safe_float(row.get("pe_ratio")),
             pb_ratio=safe_float(row.get("pb_ratio")),
             total_mv=safe_float(row.get("total_market_val")),

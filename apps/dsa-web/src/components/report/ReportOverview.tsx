@@ -165,6 +165,7 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
   meta,
   summary,
   details,
+  isHistory = false,
   watchlist,
 }) => {
   const { t } = useUiLanguage();
@@ -174,6 +175,27 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
   const partialBarLabel = meta.marketPhaseSummary?.isPartialBar === true
     ? getPartialBarLabel(reportLanguage)
     : null;
+  const effectiveDate = meta.marketPhaseSummary?.effectiveDailyBarDate
+    || meta.createdAt.slice(0, 10);
+  const effectiveTimestamp = Date.parse(`${effectiveDate}T00:00:00`);
+  const reportAgeDays = Number.isFinite(effectiveTimestamp)
+    ? Math.max(0, Math.floor((Date.now() - effectiveTimestamp) / 86_400_000))
+    : 0;
+  const historyLabel = reportLanguage === 'en'
+    ? 'Saved report'
+    : reportLanguage === 'ko'
+      ? '저장된 보고서'
+      : '历史报告';
+  const possiblyOutdatedLabel = reportLanguage === 'en'
+    ? 'May be outdated'
+    : reportLanguage === 'ko'
+      ? '정보가 오래되었을 수 있음'
+      : '信息可能已过时';
+  const dataAsOfLabel = reportLanguage === 'en'
+    ? `Data through ${effectiveDate}`
+    : reportLanguage === 'ko'
+      ? `데이터 기준 ${effectiveDate}`
+      : `数据截至 ${effectiveDate}`;
   const relatedBoards = (Array.isArray(details?.belongBoards) ? details.belongBoards : [])
     .filter((board) => normalizeBoardName(board?.name).length > 0);
   const boardSignals = buildBoardSignalMaps(details);
@@ -281,6 +303,14 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
                     <Badge variant="warning" className="shrink-0 shadow-none" aria-label={partialBarLabel}>
                       {partialBarLabel}
                     </Badge>
+                  ) : null}
+                  {isHistory ? (
+                    <Badge variant={reportAgeDays >= 3 ? 'warning' : 'default'} className="shrink-0 shadow-none">
+                      {reportAgeDays >= 3 ? possiblyOutdatedLabel : historyLabel}
+                    </Badge>
+                  ) : null}
+                  {isHistory ? (
+                    <span className="text-xs text-muted-text">{dataAsOfLabel}</span>
                   ) : null}
                   <span className="text-xs text-muted-text flex items-center gap-1">
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

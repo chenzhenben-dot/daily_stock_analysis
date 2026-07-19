@@ -156,6 +156,8 @@ class SearchResponse:
 
 class BaseSearchProvider(ABC):
     """搜索引擎基类"""
+
+    ERROR_COOLDOWN_SECONDS = 300
     
     def __init__(self, api_keys: List[str], name: str):
         """
@@ -171,6 +173,7 @@ class BaseSearchProvider(ABC):
         self._key_usage: Dict[str, int] = {key: 0 for key in api_keys}
         self._key_errors: Dict[str, int] = {key: 0 for key in api_keys}
         self._state_lock = threading.RLock()
+        self._cooldown_until = 0.0
     
     @property
     def name(self) -> str:
@@ -179,7 +182,7 @@ class BaseSearchProvider(ABC):
     @property
     def is_available(self) -> bool:
         """检查是否有可用的 API Key"""
-        return bool(self._api_keys)
+        return bool(self._api_keys) and time.time() >= self._cooldown_until
     
     def _get_next_key(self) -> Optional[str]:
         """
@@ -190,6 +193,13 @@ class BaseSearchProvider(ABC):
         with self._state_lock:
             if not self._key_cycle:
                 return None
+
+            now = time.time()
+            if now < self._cooldown_until:
+                return None
+            if self._cooldown_until:
+                self._cooldown_until = 0.0
+                self._key_errors = {key: 0 for key in self._api_keys}
             
             # 最多尝试所有 key
             for _ in range(len(self._api_keys)):
@@ -198,10 +208,15 @@ class BaseSearchProvider(ABC):
                 if self._key_errors.get(key, 0) < 3:
                     return key
             
-            # 所有 key 都有问题，重置错误计数并返回第一个
-            logger.warning(f"[{self._name}] 所有 API Key 都有错误记录，重置错误计数")
-            self._key_errors = {key: 0 for key in self._api_keys}
-            return self._api_keys[0] if self._api_keys else None
+            # Avoid immediately resetting counters and hammering a provider
+            # whose key is invalid, exhausted, or temporarily rate-limited.
+            self._cooldown_until = now + self.ERROR_COOLDOWN_SECONDS
+            logger.warning(
+                "[%s] 所有 API Key 连续失败，熔断 %s 秒",
+                self._name,
+                self.ERROR_COOLDOWN_SECONDS,
+            )
+            return None
     
     def _record_success(self, key: str) -> None:
         """记录成功使用"""

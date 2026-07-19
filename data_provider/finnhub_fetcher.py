@@ -18,6 +18,7 @@ import requests
 from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS
 from .realtime_types import UnifiedRealtimeQuote, RealtimeSource
 from .us_index_mapping import is_us_stock_code
+from src.utils.sanitize import sanitize_diagnostic_text
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,8 @@ class FinnhubFetcher(BaseFetcher):
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            raise DataFetchError(f"[Finnhub] HTTP request failed for {symbol}: {e}") from e
+            reason = sanitize_diagnostic_text(e, max_length=300) or type(e).__name__
+            raise DataFetchError(f"[Finnhub] HTTP request failed for {symbol}: {reason}") from e
 
         if data.get('s') != 'ok' or not data.get('c'):
             raise DataFetchError(f"[Finnhub] No data returned for {symbol}")
@@ -111,7 +113,11 @@ class FinnhubFetcher(BaseFetcher):
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            logger.warning(f"[Finnhub] Realtime quote failed for {symbol}: {e}")
+            logger.warning(
+                "[Finnhub] Realtime quote failed for %s: %s",
+                symbol,
+                sanitize_diagnostic_text(e, max_length=300) or type(e).__name__,
+            )
             return None
 
         price = data.get('c')
@@ -160,7 +166,11 @@ class FinnhubFetcher(BaseFetcher):
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            logger.debug(f"[Finnhub] Symbol search failed for {symbol}: {e}")
+            logger.debug(
+                "[Finnhub] Symbol search failed for %s: %s",
+                symbol,
+                sanitize_diagnostic_text(e, max_length=300) or type(e).__name__,
+            )
             return None
 
         for item in data.get('result', []):
