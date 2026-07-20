@@ -213,24 +213,104 @@ class TriggerStabilityTests(unittest.TestCase):
         sec = TRIGGER.extract_sec_financial_metrics(self.facts)
         ocf = sec["metrics"]["operating_cash_flow"]["ytd"]["val"]
         capex = sec["metrics"]["capex"]["ytd"]["val"]
-        label, fcf = TRIGGER._compute_ytd_fcf(sec["metrics"])
+        label, fcf, scope = TRIGGER._compute_fcf(sec["metrics"])
         self.assertEqual(label, "YTD")
+        self.assertEqual(scope, "ytd")
         self.assertAlmostEqual(ocf - capex, 4.411e9, delta=1e-6)
         self.assertAlmostEqual(fcf, 4.411e9, delta=1e-6)
 
     def test_fcf_ttm_label_is_not_faked_when_only_ytd_exists(self):
-        """Without a full TTM window the dashboard must NOT call the value TTM."""
+        """Round 2 acceptance: fcf_yield must NEVER be calculated from
+        YTD-only cash-flow data; the KPI card must show a clear scope
+        label (YTD) and yield must read 不适用."""
         sec = TRIGGER.extract_sec_financial_metrics(self.facts)
         base = {"fcf_ttm": "未披露 / 待验证", "fcf_yield": "未披露 / 待验证"}
         stock_data = {"sec_financials": sec, "market_cap": 2.006e11}
         TRIGGER._apply_sec_quarter_override(stock_data, base)
         self.assertIn("YTD", base["fcf_ttm"])
-        # The first word of fcf_ttm is the scope label; must not be "TTM".
         first_word = base["fcf_ttm"].split(" ")[0]
         self.assertNotEqual(first_word, "TTM")
-        self.assertTrue(base["fcf_yield"].endswith("%"))
+        # fcf_yield must explicitly say 不适用, not a percent.
+        self.assertIn("不适用", base["fcf_yield"])
 
-    def test_duplicate_context_is_deduplicated(self):
+    def test_ytd_fcf_does_not_compute_yield(self):
+        """Independent of override path: _compute_fcf returns
+        (label, value, scope) where scope=='ytd' for a 280-day window.
+        _compute_fcf_yield must NOT be invoked for that scope."""
+        sec = TRIGGER.extract_sec_financial_metrics(self.facts)
+        metrics = sec["metrics"]
+        label, value, scope = TRIGGER._compute_fcf(metrics)
+        self.assertEqual(label, "YTD")
+        self.assertEqual(scope, "ytd")
+        # _compute_fcf_yield never sees this scope — see _apply_sec_quarter_override.
+        # If someone wires the wrong branch, the override path asserts the
+        # marker text instead of computing.
+        base = {}
+        TRIGGER._apply_sec_quarter_override(
+            {"sec_financials": sec, "market_cap": 2.006e11}, base)
+        self.assertFalse(
+            base["fcf_yield"].endswith("%"),
+            "fcf_yield should not be a percent for YTD; got {!r}".format(
+                base["fcf_yield"]))
+
+    def test_quarter_row_uses_same_period_yoy_header(self):
+        """latest_quarter_rows column 1 == '上年同期', column 3 == '同比'.
+        Subsequent cell-content upgrade must therefore land these bucket
+        labels, not the legacy 上季度/Q/Q ones."""
+        self.assertEqual(
+            TRIGGER.ROW_SCHEMAS["latest_quarter_rows"][1], "上年同期")
+        self.assertEqual(
+            TRIGGER.ROW_SCHEMAS["latest_quarter_rows"][3], "同比")
+        sec = TRIGGER.extract_sec_financial_metrics(self.facts)
+        q_rows, _ = TRIGGER._build_sec_quarterly_rows(sec)
+        normalized = TRIGGER.normalize_model_row_html(
+            "latest_quarter_rows", q_rows)
+        self.assertIsNotNone(normalized)
+        # The column-1 header label (上年同期) must drive cell substitutions.
+        upgraded = TRIGGER._upgrade_row_cells(
+            '<tr><td>X</td><td>未披露 / 待验证</td><td>$1</td>'
+            '<td>未披露 / 待验证</td></tr>',
+            row_field="latest_quarter_rows",
+            fallback_label=TRIGGER.MISSING_TO_CROSS_VERIFY)
+        # 0==指标 → first cell never gets upgraded; column 1 (上年同期) and
+        # column 3 (同比) both bucket to 不适用 per _ROW_COLUMN_LABELS.
+        self.assertIn("不适用", upgraded)
+
+    def test_fy_comparison_rows_does_not_contain_ytd_cf(self):
+        """_build_sec_fy_rows must NEVER pull OCF/CapEx from the .ytd
+        block — those are not full-fiscal-year numbers and would 100%
+        mismatch the table header. YTD lives in the Free Cash Flow KPI
+        card and is labeled YTD."""
+        sec = TRIGGER.extract_sec_financial_metrics(self.facts)
+        fy_rows = TRIGGER._build_sec_fy_rows(sec)
+        for forbidden in (
+            "Operating Cash Flow (累计)",
+            "Capital Expenditure (累计)",
+            "OCF",
+            "CapEx",
+            "YTD",
+        ):
+            self.assertNotIn(forbidden, fy_rows,
+                            "fy_comparison_rows must not contain {!r}".format(forbidden))
+
+    def test_business_rows_consolidated_not_single_segment(self):
+        """Without explicit XBRL segment tags we must NOT assert
+        'single reportable segment' or '单一份部'; the consolidated
+        row uses the LATEST SINGLE QUARTER revenue (not YTD)."""
+        sec = TRIGGER.extract_sec_financial_metrics(self.facts)
+        rows = TRIGGER._build_sec_business_rows(sec, "Sandisk")
+        for forbidden in (
+            "单一份部",
+            "单一报告分部",
+            "单一 报告分部",
+            "报告分部（单一）",
+        ):
+            self.assertNotIn(forbidden, rows)
+        # Must use the latest quarter ($5.95B), not the YTD ($11.28B).
+        self.assertIn("$5.95B", rows)
+        self.assertNotIn("$11.28B", rows)
+
+    def test_business_rows_does_not_fabricate_product_splits(self):
         sec = TRIGGER.extract_sec_financial_metrics(self.facts)
         rev = sec["metrics"]["revenue"]
         # The dedup is internal; the public API exposes a single "latest_q"
@@ -332,6 +412,84 @@ class TriggerStabilityTests(unittest.TestCase):
         bs_rows = TRIGGER._build_sec_balance_sheet_rows(sec)
         self.assertIsNotNone(
             TRIGGER.normalize_model_row_html("balance_sheet_rows", bs_rows))
+
+    def test_multi_segment_company_does_not_get_single_segment_assertion(self):
+        """A ticker whose 10-K Note already documents three reportable
+        segments must NOT be collapsed into a single 合并 row just
+        because XBRL companyfacts does not itself carry the Segment axis
+        in our extractor. The override path must preserve the LLM's
+        segment detail whenever the financial values come from research
+        sources the LLM cited, and must never typecast the ticker into
+        a "non-segment" label on its own."""
+        facts = _build_multi_segment_companyfacts()
+        sec = TRIGGER.extract_sec_financial_metrics(facts)
+        # Multi-segment fixture inherits the SNDK-only tag set our
+        # extractor looks for. The override therefore has the same
+        # data signature as SNDK, so business_rows still must NOT
+        # say "single reportable segment" — the multi-segment evidence
+        # simply lives in the LLM-supplied dashboard_data, which the
+        # override path must not erase.
+        dashboard = {
+            "company_name": "Acme Storage",
+            "business_rows": "<tr>" + "".join(
+                "<td>{}</td>".format(c) for c in (
+                    "Consumer Storage",
+                    "$2.0B", "35%", "+12%", "+4%", "消费电子主品牌阵地",
+                )) + "</tr>\n" + "<tr>" + "".join(
+                    "<td>{}</td>".format(c) for c in (
+                        "Enterprise Storage",
+                        "$3.5B", "61%", "+18%", "+7%", "数据中心 AI 增量",
+                    )) + "</tr>" + "<tr>" + "".join(
+                    "<td>{}</td>".format(c) for c in (
+                        "Removable",
+                        "$0.2B", "4%", "-3%", "-1%", "消费长尾",
+                    )) + "</tr>",
+            "data_sources": [],
+        }
+        stock_data = {"sec_financials": sec, "market_cap": 9.0e10}
+        TRIGGER._apply_sec_dashboard_override(dashboard, stock_data)
+        rows = dashboard["business_rows"]
+        # Original three-row segment layout survives.
+        self.assertEqual(rows.count("<tr>"), 3)
+        for forbidden in ("单一份部", "单一报告分部", "non-segment",
+                          "non-segment data"):
+            self.assertNotIn(forbidden, rows)
+        # Each product line survives.
+        self.assertIn("Consumer Storage", rows)
+        self.assertIn("Enterprise Storage", rows)
+
+
+def _build_multi_segment_companyfacts():
+    """Synthesises a SEC fixture for a fictional multi-segment storage
+    company. Unlike the SNDK fixture this one is here purely to prove
+    the override path does not flatten every ticker into a single
+    合并 row."""
+    def f(end, start, val, fp="Q3", fy=2026, filed="2026-05-01",
+          accn="0009999999-26-000010", form="10-Q"):
+        return {
+            "end": end, "start": start, "val": val, "accn": accn,
+            "fy": fy, "fp": fp, "form": form, "filed": filed,
+            "frame": "CY{}Q{}".format(fy, fp[1]), "unit": "USD",
+        }
+    return {
+        "cik": 9999999,
+        "entityName": "Acme Storage Corp",
+        "facts": {"us-gaap": {
+            "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                "label": "Revenue",
+                "units": {"USD": [
+                    f("2026-04-03", "2026-01-04", 5.7e9),
+                    f("2025-04-04", "2024-12-29", 2.1e9, fp="Q3", fy=2025, filed="2025-05-02"),
+                ]},
+            },
+            "NetIncomeLoss": {
+                "label": "Net Income",
+                "units": {"USD": [
+                    f("2026-04-03", "2026-01-04", 1.5e9),
+                ]},
+            },
+        }},
+    }
 
 
 if __name__ == "__main__":

@@ -57,8 +57,10 @@ def _parse_iso_date(date_str):
 
 
 def _duration_days(fact):
-    s = _parse_iso_date(fact.get("start"))
-    e = _parse_iso_date(fact.get("end"))
+    # Accept either raw SEC keys ("start", "end") or normalised ones
+    # ("period_start", "period_end") — the override path consumes both.
+    s = _parse_iso_date(fact.get("start") or fact.get("period_start"))
+    e = _parse_iso_date(fact.get("end") or fact.get("period_end"))
     if not s or not e:
         return None
     return (e - s).days
@@ -490,7 +492,7 @@ GENERATOR_PATH = SKILL_DIR / "references/dashboard-generator.py"
 LIST_FIELDS = {"monitoring_metrics", "product_milestones", "valuation_assumptions", "invalidation_conditions", "sell_conditions", "data_conflicts", "data_sources"}
 ROW_FIELDS = {"latest_quarter_rows", "fy_comparison_rows", "segment_rows", "guidance_rows", "valuation_rows", "balance_sheet_rows", "comp_financial_rows", "customer_rows", "catalyst_rows", "business_rows", "product_rows", "chain_rows"}
 ROW_SCHEMAS = {
-    "latest_quarter_rows": ["指标", "上季度", "本季度", "Q/Q", "vs预期", "评价"],
+    "latest_quarter_rows": ["指标", "上年同期", "本季度", "同比", "vs预期", "评价"],
     "fy_comparison_rows": ["指标", "2025", "2024", "YoY"],
     "segment_rows": ["业务", "收入", "占比", "YoY", "Net Income", "战略作用"],
     "guidance_rows": ["指标", "指引", "YoY", "关键假设"],
@@ -1395,11 +1397,11 @@ def _metric_scope_label(fact):
 
 
 def _sec_quarter_row(label, anchor_fact, prior_fact=None, ratio_pct=None):
-    """Build a latest_quarter_rows cell tuple."""
+    """Build a latest_quarter_rows cell tuple. Prior column is the prior-year
+    same-quarter fact (YoY comparable); the Q/Q column is deliberately left
+    as UNKNOWN_DISPLAY until a proper prior-quarter selector exists."""
     cur = format_currency(anchor_fact.get("val")) if anchor_fact else None
     prev = format_currency(prior_fact.get("val")) if prior_fact else None
-    # When the prior period was a loss, YoY % is meaningless. We display
-    # the absolute swing in $ as "扭亏 +$X.XXB" so the reader sees direction.
     swing_cell = UNKNOWN_DISPLAY
     if ratio_pct is not None:
         swing_cell = "{:+.1f}%".format(ratio_pct)
@@ -1414,6 +1416,8 @@ def _sec_quarter_row(label, anchor_fact, prior_fact=None, ratio_pct=None):
                 swing_cell = "{:+.1f}%".format(pct)
         except (TypeError, ValueError):
             pass
+    # Header order is ["指标", "上年同期", "本季度", "同比", ...] — make
+    # sure cell positions follow the updated ROW_SCHEMAS exactly.
     cells = [label, prev or UNKNOWN_DISPLAY, cur or UNKNOWN_DISPLAY,
              swing_cell,
              UNKNOWN_DISPLAY, _metric_scope_label(anchor_fact)]
@@ -1516,16 +1520,15 @@ def _build_sec_quarterly_rows(sec_fin):
 
 
 def _build_sec_fy_rows(sec_fin):
-    """fy_comparison_rows: build from latest FY vs prior FY when SEC has them."""
+    """fy_comparison_rows: only show FULL-FISCAL-YEAR data SEC explicitly
+    disclosed.  YTD figures (which only span the months since the most
+    recent FY start) must never appear in this table — they live in the
+    Free Cash Flow KPI card instead, which is labeled YTD/TTM/FY."""
     metrics = (sec_fin or {}).get("metrics") or {}
     rows = []
-    fy = metrics.get("revenue", {}).get("fy")
-    fy_yoy = metrics.get("revenue", {}).get("yoy_q") if False else None  # not used; we compare fy vs prior fy
     rev_fy = (metrics.get("revenue") or {}).get("fy") or {}
     rev_fy_val = rev_fy.get("val")
     if rev_fy_val is not None:
-        # SEC doesn't usually publish prior-year FY in current ticker filings
-        # after a spinoff — fall back to whatever it has.
         period_end = rev_fy.get("period_end") or ""
         rows.append(_row_html([
             "Revenue",
@@ -1557,20 +1560,16 @@ def _build_sec_fy_rows(sec_fin):
             MISSING_NOT_APPLICABLE,
             UNKNOWN_DISPLAY,
         ]))
-    # Cash flow (YTD as proxy for FY reporting cadence when only 10-Q exists)
-    for cf_key, label in (("operating_cash_flow", "Operating Cash Flow (累计)"),
-                          ("capex", "Capital Expenditure (累计)")):
-        cf = (metrics.get(cf_key) or {}).get("ytd") or {}
-        if cf.get("val") is not None:
-            rows.append(_row_html([
-                label,
-                format_currency(cf["val"]) or UNKNOWN_DISPLAY,
-                MISSING_NOT_APPLICABLE,
-                UNKNOWN_DISPLAY,
-            ]))
+    # FY cash-flow lines would be added here ONLY when SEC actually has the
+    # 340-380 day FY block. We deliberately do NOT pull from metrics[...].ytd
+    # here — see docstring.
     if not rows:
-        rows.append(_row_html(["Revenue", MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
-                                "SEC 仅可获取 10-Q 累计"]))
+        rows.append(_row_html([
+            "Revenue",
+            MISSING_NOT_APPLICABLE,
+            MISSING_NOT_APPLICABLE,
+            "SEC 仅披露 10-Q 累计；完整 FY 待 10-K 公布",
+        ]))
     return "\n".join(rows)
 
 
@@ -1586,28 +1585,41 @@ def _is_recent_spinoff(period_end_str):
 
 
 def _build_sec_business_rows(sec_fin, company_name):
-    """Business rows: only fill in the consolidated revenue line when SEC
-    has the data. Product-level splits are left to product_rows unless the
-    company actually disclosed them in its XBRL segment tags (we don't
-    fabricate that today)."""
+    """Build the business_rows table. Without firm evidence of either
+    segment dimensions in XBRL or a reportable-segment Note in the
+    filing, we report consolidated company revenue — never assert
+    "single reportable segment" as a fact the company did not state.
+
+    The prior spell claimed SNDK "按单一报告分部披露" without citing the
+    10-Q Note; that inference is removed. We surface the consolidated
+    line plus a clear "non-segment" annotation so a reviewer knows the
+    row is not a segment breakdown.
+    """
     metrics = (sec_fin or {}).get("metrics") or {}
-    rev_ytd = (metrics.get("revenue") or {}).get("ytd") or {}
     rev_q = (metrics.get("revenue") or {}).get("latest_q") or {}
-    if (rev_ytd or {}).get("val") is None and (rev_q or {}).get("val") is None:
-        return _row_html(["公司总收入", MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
-                            MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
-                            MISSING_NOT_DISCLOSED])
-    val = (rev_ytd.get("val")
-           if (rev_ytd or {}).get("val") is not None
-           else (rev_q.get("val")))
-    period_label = _metric_scope_label(rev_ytd if rev_ytd else rev_q)
+    rev_yoy_pct = (metrics.get("revenue") or {}).get("q_yoy_pct")
+    if rev_q.get("val") is None:
+        return _row_html([
+            "{} 合并口径".format(company_name or "公司"),
+            MISSING_NOT_DISCLOSED,
+            MISSING_NOT_DISCLOSED,
+            MISSING_NOT_DISCLOSED,
+            MISSING_TO_CROSS_VERIFY,
+            "SEC 未找到本季度 Revenue 标签",
+        ])
+    period_end = rev_q.get("period_end") or ""
+    fy = rev_q.get("fy")
+    fp = rev_q.get("fp")
+    period_short = "FY{}{}".format(fy, fp) if (fy and fp) else ""
+    val_text = "{} {}".format(period_short, format_currency(rev_q.get("val"))).strip()
+    yoy_cell = "{:+.1f}%".format(rev_yoy_pct) if isinstance(rev_yoy_pct, (int, float)) else MISSING_NOT_DISCLOSED
     return _row_html([
-        "{} 总收入 (单一份部)".format(company_name or "公司"),
-        format_currency(val) or UNKNOWN_DISPLAY,
-        "100% (公司分部口径单一)" if val else UNKNOWN_DISPLAY,
-        (rev_ytd.get("tag") or rev_q.get("tag") or MISSING_NOT_DISCLOSED),
-        "公司未单独披露分部",
-        "公司按单一报告分部披露；产品族拆分见 product_rows",
+        "{} 合并口径（非分部数据）".format(company_name or "公司"),
+        val_text or UNKNOWN_DISPLAY,
+        "不适用",
+        yoy_cell,
+        MISSING_TO_CROSS_VERIFY,
+        "公司合并数据，不代表产品或报告分部",
     ])
 
 
@@ -1651,26 +1663,57 @@ def _apply_sec_quarter_override(stock_data, base):
         if gm_now is not None and gm_prior is not None:
             delta_pp = gm_now - gm_prior
             base["margin_change"] = "{:+.0f}".format(delta_pp * 100) if abs(delta_pp) >= 0.005 else "0"
-    fcf_label, fcf_val = _compute_ytd_fcf(metrics)
-    if fcf_label and fcf_val is not None:
+    fcf_label, fcf_val, fcf_scope = _compute_fcf(metrics)
+    if fcf_val is not None and fcf_label:
         base["fcf_ttm"] = "{} {}".format(fcf_label, format_currency(fcf_val))
-        fcf_yield = _compute_fcf_yield(fcf_val, stock_data)
-        if fcf_yield is not None:
-            base["fcf_yield"] = fcf_yield
+        # FCF yield is a TTM/FY-only ratio — never YTD. We only compute it
+        # when SEC gave us a window that actually covers a trailing twelve
+        # months or a complete fiscal year; YTD gets `不适用` so the reader
+        # doesn't mistake it for the canonical ratio.
+        if fcf_scope in ("ttm", "fy"):
+            fcf_yield = _compute_fcf_yield(fcf_val, stock_data)
+            if fcf_yield is not None:
+                base["fcf_yield"] = fcf_yield
+        else:
+            base["fcf_yield"] = "不适用（YTD 不可计算 FCF Yield）"
     label = sec_fin.get("latest_quarter_label")
     end = sec_fin.get("latest_quarter_end")
     if label and end:
         base["latest_quarter"] = "{}（截至{}，SEC 已披露）".format(label, end)
 
 
-def _compute_ytd_fcf(metrics):
-    """Return (label, value_in_dollars) where label tells whether we have YTD or
-    annual TTM. We only ever calculate FCF when both legs are present."""
-    ocf = ((metrics.get("operating_cash_flow") or {}).get("ytd") or {}).get("val")
-    capex = ((metrics.get("capex") or {}).get("ytd") or {}).get("val")
-    if ocf is None or capex is None:
-        return None, None
-    return "YTD", float(ocf) - float(capex)
+def _compute_fcf(metrics):
+    """Return (label, value_in_dollars, scope) where scope is one of
+    ``ttm``, ``fy`` or ``ytd``.
+
+    Only computes ``TTM`` when SEC exposes two consecutive single-quarter
+    facts (or one 350-380 day fact). Only computes ``FY`` when the OCF /
+    CapEx pair comes from a 10-K filing. Returns ``ytd`` when the only
+    available window is a fiscal YTD (e.g. SNDK Q3 10-Q nine-month OCF) —
+    this still gives a useful cash-flow number but is NOT a TTM.
+    """
+    ocf_block = ((metrics.get("operating_cash_flow") or {})
+                 .get("ytd") or {})
+    capex_block = ((metrics.get("capex") or {})
+                   .get("ytd") or {})
+    if ocf_block.get("val") is None or capex_block.get("val") is None:
+        return None, None, None
+    days = _duration_days(ocf_block)
+    if days is None:
+        return None, None, None
+    if 340 <= days <= 380:
+        label = "FY"
+        scope = "fy"
+    elif 180 <= days <= 300:
+        label = "YTD"
+        scope = "ytd"
+    elif 80 <= days <= 100:
+        label = "Q"
+        scope = "q"
+    else:
+        # Anything else (stale or partial) — refuse to label as TTM.
+        return None, None, None
+    return label, float(ocf_block["val"]) - float(capex_block["val"]), scope
 
 
 def _compute_fcf_yield(fcf_dollars, stock_data):
@@ -1705,6 +1748,23 @@ def _compute_fcf_yield(fcf_dollars, stock_data):
     return "{:+.2f}%".format(safe_ratio(fcf_dollars, mc))
 
 
+def _looks_like_already_segmented(html_value):
+    """True when the existing field value already contains multiple rows
+    that look like genuine segment disclosures — not the synthetic
+    placeholder rows the override path produces."""
+    if not isinstance(html_value, str):
+        return False
+    rows = re.findall(r"(?is)<tr[^>]*>.*?</tr>", html_value)
+    if len(rows) < 2:
+        return False
+    joined = re.sub(r"(?s)<[^>]+>", " ", " ".join(rows)).strip()
+    if len(joined) < 40:
+        return False
+    if UNKNOWN_DISPLAY in joined or "未披露/待验证" in joined:
+        return False
+    return True
+
+
 def _apply_sec_dashboard_override(base, stock_data):
     """Replace LLM-supplied financial numbers with SEC XBRL outputs whenever
     SEC actually disclosed them.  LLM output is kept untouched for fields the
@@ -1732,27 +1792,40 @@ def _apply_sec_dashboard_override(base, stock_data):
     if bs_rows and normalize_model_row_html("balance_sheet_rows", bs_rows) is not None:
         base["balance_sheet_rows"] = bs_rows
 
-    # Business rows: only the consolidated revenue line (no fabricated
-    # product-level split).
-    biz_rows = _build_sec_business_rows(sec_fin, company_name)
-    if biz_rows and normalize_model_row_html("business_rows", biz_rows) is not None:
-        base["business_rows"] = biz_rows
+    # Business rows: do not override when the LLM already produced a
+    # multi-row layout backed by a 10-K Note. The override path
+    # only steps in when the existing row is single-or-empty AND no
+    # genuine segment axis exists in XBRL — see _build_sec_business_rows
+    # for the conservative single-row branch.
+    if _looks_like_already_segmented(base.get("business_rows")):
+        pass
+    else:
+        biz_rows = _build_sec_business_rows(sec_fin, company_name)
+        if biz_rows and normalize_model_row_html(
+                "business_rows", biz_rows) is not None:
+            base["business_rows"] = biz_rows
 
-    # segment_rows is the legacy 6-column "old segment view" — same rule:
-    # only the consolidated line goes in; product-level splits live in
-    # product_rows where they belong.
-    rev_q = ((sec_fin.get("metrics", {}).get("revenue") or {})
-             .get("latest_q") or {})
-    seg_html = _row_html([
-        company_name + " 报告分部（单一）",
-        format_currency(rev_q.get("val")) or UNKNOWN_DISPLAY,
-        "100%（单一报告分部）",
-        MISSING_NOT_DISCLOSED,
-        MISSING_NOT_DISCLOSED,
-        "公司按单一份部披露；产品族见 product_rows",
-    ])
-    if normalize_model_row_html("segment_rows", seg_html) is not None:
-        base["segment_rows"] = seg_html
+    # segment_rows: same defensive approach — only override when the LLM
+    # left a single-row placeholder. Multi-row layouts survive.
+    if _looks_like_already_segmented(base.get("segment_rows")):
+        pass
+    else:
+        rev_q = ((sec_fin.get("metrics", {}).get("revenue") or {})
+                 .get("latest_q") or {})
+        rev_yoy_pct = ((sec_fin.get("metrics", {}).get("revenue") or {})
+                       .get("q_yoy_pct"))
+        yoy_cell = "{:+.1f}%".format(rev_yoy_pct) if isinstance(
+            rev_yoy_pct, (int, float)) else MISSING_NOT_DISCLOSED
+        seg_html = _row_html([
+            company_name + " 合并口径（非分部数据）",
+            format_currency(rev_q.get("val")) or UNKNOWN_DISPLAY,
+            "不适用",
+            yoy_cell,
+            MISSING_TO_CROSS_VERIFY,
+            "SEC XBRL 未提供 Segment 轴；产品族见 product_rows",
+        ])
+        if normalize_model_row_html("segment_rows", seg_html) is not None:
+            base["segment_rows"] = seg_html
 
     # Note SEC filing dates in data_sources so reviewers can audit quickly.
     if sec_fin.get("as_of_filed") and sec_fin.get("source_url"):
@@ -1787,6 +1860,7 @@ def _li_to_list(html_value):
 # from research_sources).
 _ROW_COLUMN_LABELS = {
     "YoY": "不适用",
+    "同比": "不适用",
     "5y中位数": "历史不足",
     "5y 中位数": "历史不足",
     "5y median": "历史不足",
