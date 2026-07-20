@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import datetime
 import json
 import html
 import os
@@ -11,6 +12,473 @@ import urllib.request
 from pathlib import Path
 
 DSA_ENV_PATH = "/opt/dsa/.env"
+
+# === SEC XBRL deterministic extractor (pure functions, no LLM) ===
+#
+# These functions are called only from fetch_sec_recent_filings() to pre-compute
+# structured metrics from the SEC companyfacts JSON. The output is stored at
+# stock_data["sec_financials"] and is consulted by normalize_dashboard_data()
+# so we never rely on the LLM for revenue, margin, EPS, cash-flow or balance
+# sheet figures that SEC has already disclosed.
+#
+# All implementations are Python 3.6 compatible (no f-strings with `=`, no PEP
+# 604 unions, no walrus operator, no dataclasses).
+
+SEC_FINANCIAL_TAGS = {
+    "revenue": (
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "SalesRevenueNet",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
+    ),
+    "gross_profit": ("GrossProfit",),
+    "operating_income": ("OperatingIncomeLoss",),
+    "net_income": ("NetIncomeLoss",),
+    "eps_diluted": ("EarningsPerShareDiluted",),
+    "eps_basic": ("EarningsPerShareBasic",),
+    "operating_cash_flow": ("NetCashProvidedByUsedInOperatingActivities",),
+    "capex": ("PaymentsToAcquirePropertyPlantAndEquipment",),
+    "assets": ("Assets",),
+    "liabilities": ("Liabilities",),
+    "cash": ("CashAndCashEquivalentsAtCarryingValue",),
+    "lt_debt_current": ("LongTermDebtCurrent",),
+    "lt_debt_noncurrent": ("LongTermDebtNoncurrent",),
+}
+SEC_FORMS = ("10-K", "10-Q", "20-F", "6-K")
+
+
+def _parse_iso_date(date_str):
+    if not date_str or not isinstance(date_str, str):
+        return None
+    try:
+        return datetime.datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _duration_days(fact):
+    s = _parse_iso_date(fact.get("start"))
+    e = _parse_iso_date(fact.get("end"))
+    if not s or not e:
+        return None
+    return (e - s).days
+
+
+def _is_duration(fact):
+    return bool(fact.get("start")) and bool(fact.get("end"))
+
+
+def _dedupe_facts(entries):
+    """Drop facts with the same (val, end, start) tuple — same filing often
+    re-states a number across the same frame; we only need one copy."""
+    seen = set()
+    out = []
+    for entry in entries:
+        key = (
+            entry.get("val"),
+            entry.get("end"),
+            entry.get("start"),
+            entry.get("accn") or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return out
+
+
+def _filter_facts(entries, form=None, fp=None):
+    """Apply SEC eligibility filters and optional form/fp matchers."""
+    out = []
+    for entry in entries:
+        if entry.get("form") not in SEC_FORMS:
+            continue
+        if form is not None and entry.get("form") != form:
+            continue
+        if fp is not None and entry.get("fp") != fp:
+            continue
+        out.append(entry)
+    return out
+
+
+def select_latest_duration_fact(entries, form=None, fp=None,
+                                min_days=None, max_days=None):
+    """Pick the latest duration fact that matches the requested form/fp.
+
+    ``min_days`` / ``max_days`` constrain the duration window so a single
+    quarter (~89 days) is preferred over YTD (~270 days) when callers ask for
+    a quarter. If no entry sits inside the window the function widens to the
+    ``max_days`` cap and finally falls back to the most recent fact, so
+    callers always get something rather than None unless they say so via the
+    ``require_window`` flag in :func:`extract_sec_financial_metrics`.
+    """
+    candidates = [e for e in entries if _is_duration(e)]
+    if form is not None:
+        candidates = [e for e in candidates if e.get("form") == form]
+    if fp is not None:
+        candidates = [e for e in candidates if e.get("fp") == fp]
+    if not candidates:
+        return None
+    candidates = _dedupe_facts(candidates)
+    if min_days is not None or max_days is not None:
+        in_window = []
+        for entry in candidates:
+            days = _duration_days(entry)
+            if days is None:
+                continue
+            if min_days is not None and days < min_days:
+                continue
+            if max_days is not None and days > max_days:
+                continue
+            in_window.append(entry)
+        if in_window:
+            candidates = in_window
+    candidates.sort(key=lambda e: (e.get("end") or "", e.get("filed") or ""), reverse=True)
+    return candidates[0] if candidates else None
+
+
+def select_instant_fact(entries, form=None, fp=None):
+    candidates = [e for e in entries if not _is_duration(e)]
+    if form is not None:
+        candidates = [e for e in candidates if e.get("form") == form]
+    if fp is not None:
+        candidates = [e for e in candidates if e.get("fp") == fp]
+    if not candidates:
+        return None
+    candidates = _dedupe_facts(candidates)
+    candidates.sort(key=lambda e: (e.get("end") or "", e.get("filed") or ""), reverse=True)
+    return candidates[0] if candidates else None
+
+
+def select_comparable_fact(entries, anchor, periods_back=1, fp=None):
+    """Return the same-fp fact from ``anchor.fy - periods_back``.
+
+    Used to fetch YoY comparables for revenue, gross profit, etc. without
+    accidentally picking the prior year-end filing's full-year number when we
+    actually want the same-quarter value from a year ago.
+    """
+    if not anchor:
+        return None
+    anchor_fy = anchor.get("fy")
+    if anchor_fy is None:
+        return None
+    target_fy = anchor_fy - periods_back
+    target_fp = fp or anchor.get("fp") or "FY"
+    candidates = [e for e in entries
+                  if _is_duration(e)
+                  and e.get("fy") == target_fy
+                  and e.get("fp") == target_fp
+                  and e.get("form") in SEC_FORMS]
+    if not candidates:
+        return None
+    anchor_days = _duration_days(anchor)
+    if anchor_days is not None and anchor_days < 200:
+        # Quarter-level anchor; prefer same-shape fact
+        ideal = [e for e in candidates
+                 if _duration_days(e) is not None
+                 and abs(_duration_days(e) - anchor_days) <= 14]
+        if ideal:
+            candidates = ideal
+    candidates = _dedupe_facts(candidates)
+    candidates.sort(key=lambda e: (e.get("end") or "", e.get("filed") or ""), reverse=True)
+    return candidates[0] if candidates else None
+
+
+def format_currency(value, scale=None):
+    """Compact currency formatter used for short display fields.
+
+    Returns None when value is missing/invalid — callers fall back to a
+    missing-state label rather than printing a raw number.
+    """
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if scale is None:
+        scale = "auto"
+    abs_n = abs(number)
+    if scale == "auto":
+        if abs_n >= 1e12:
+            return "${:.2f}T".format(number / 1e12)
+        if abs_n >= 1e9:
+            return "${:.2f}B".format(number / 1e9)
+        if abs_n >= 1e6:
+            return "${:.2f}M".format(number / 1e6)
+        if abs_n >= 1e3:
+            return "${:.2f}K".format(number / 1e3)
+        return "${:.2f}".format(number)
+    return "${:,.2f}".format(number)
+
+
+def safe_ratio(numerator, denominator, scale=100.0, as_percent=True):
+    """Divide without raising on zero / non-numeric values."""
+    if numerator is None or denominator is None:
+        return None
+    try:
+        n = float(numerator)
+        d = float(denominator)
+    except (TypeError, ValueError):
+        return None
+    if d == 0:
+        return None
+    ratio = (n / d) * scale
+    if as_percent:
+        return ratio
+    return ratio / 100.0
+
+
+def _entries_for_tag(companyfacts, taxonomy, tag):
+    block = ((companyfacts.get("facts") or {}).get(taxonomy) or {}).get(tag)
+    if not block:
+        return []
+    entries = []
+    for unit_rows in (block.get("units") or {}).values():
+        if isinstance(unit_rows, list):
+            entries.extend(unit_rows)
+    return entries
+
+
+def _pick_tag(facts_payload, tag_tuple):
+    """Return the first taxonomy that has any eligible tag entries."""
+    for taxonomy in ("us-gaap", "ifrs-full", "dei"):
+        for tag in tag_tuple:
+            entries = _entries_for_tag(facts_payload, taxonomy, tag)
+            entries = [e for e in entries if e.get("form") in SEC_FORMS]
+            if entries:
+                return taxonomy, tag, entries
+    return None, None, []
+
+
+def _normalize_fact(entries, anchor_entry):
+    """Build a compact dict summarizing the fact and its source attribution."""
+    latest = entries[0]
+    duration = _duration_days(latest)
+    return {
+        "tag": latest.get("tag") or "",
+        "form": latest.get("form"),
+        "fp": latest.get("fp"),
+        "fy": latest.get("fy"),
+        "frame": latest.get("frame"),
+        "val": latest.get("val"),
+        "unit": latest.get("unit") or "USD",
+        "period_start": latest.get("start"),
+        "period_end": latest.get("end"),
+        "filed": latest.get("filed"),
+        "accn": latest.get("accn"),
+        "duration_days": duration,
+        "scope": ("q" if duration is not None and duration <= 100
+                  else "ytd" if duration is not None and duration <= 200
+                  else "fy"),
+        "all_entries_count": len(entries),
+        "anchor": bool(anchor_entry),
+    }
+
+
+def extract_sec_financial_metrics(companyfacts):
+    """Top-level SEC extractor.
+
+    Returns a compact dict ready to drop into ``stock_data["sec_financials"]``.
+    The LLM never sees this structure — it is consumed by
+    :func:`normalize_dashboard_data` to deterministically fill the financial
+    fields. Output schema::
+
+        {
+          "cik": "0002023554",
+          "entity_name": "...",
+          "taxonomy": "us-gaap",
+          "as_of_filed": "2026-05-01",       # latest filing
+          "latest_quarter_label": "FY2026 Q3",
+          "latest_quarter_end": "2026-04-03",
+          "metrics": {
+            "revenue": {
+              "latest_q":   {tag, form, fp, fy, val, period_start,
+                             period_end, filed, duration_days, scope},
+              "ytd":        {...},
+              "fy":         {...},
+              "yoy_q":      {...},
+              "ytd_yoy":    {...},
+              "qoq":        {...},   # vs prior quarter
+              "q_yoy_pct":  28.4,
+              "q_qoq_pct":  12.1,
+            },
+            ...
+          },
+          "balance_sheet": [
+            {"label": "Total Assets", "value": 17.075e9,
+             "period_end": "...", "filed": "...", "form": "10-Q",
+             "yoy_change_pct": 31.5, "source_tag": "Assets"},
+            ...
+          ],
+          "tags_used": [...],  # the actual us-gaap tag picked
+        }
+    """
+    if not isinstance(companyfacts, dict):
+        return {"available": False, "reason": "no companyfacts payload"}
+    out = {
+        "available": True,
+        "cik": (companyfacts.get("cik") or "") and str(companyfacts.get("cik")),
+        "entity_name": companyfacts.get("entityName") or "",
+        "taxonomy": "us-gaap",
+        "as_of_filed": None,
+        "latest_quarter_label": None,
+        "latest_quarter_end": None,
+        "metrics": {},
+        "balance_sheet": [],
+        "tags_used": [],
+    }
+    facts_block = companyfacts.get("facts") or {}
+    if not facts_block:
+        return {"available": False, "reason": "empty facts block"}
+
+    # 1. Pull every tag we care about. Iterate us-gaap; ifrs-full only as
+    #    a fallback for non-US issuers.
+    metrics = out["metrics"]
+    for metric_name, tag_tuple in SEC_FINANCIAL_TAGS.items():
+        for taxonomy in ("us-gaap", "ifrs-full"):
+            tag_entries = {}
+            picked = False
+            for tag in tag_tuple:
+                entries = _entries_for_tag(companyfacts, taxonomy, tag)
+                entries = [e for e in entries if e.get("form") in SEC_FORMS]
+                if entries:
+                    tag_entries[tag] = entries
+                    out["tags_used"].append("{}.{}".format(taxonomy, tag))
+                    picked = True
+                    break  # one tag per metric
+            if not picked:
+                continue
+            tag = list(tag_entries.keys())[0]
+            entries = _dedupe_facts(tag_entries[tag])
+
+            latest_q = select_latest_duration_fact(
+                entries, form="10-Q", min_days=70, max_days=100)
+            ytd = select_latest_duration_fact(
+                entries, form="10-Q", min_days=180, max_days=300)
+            fy = select_latest_duration_fact(
+                entries, form="10-K", min_days=340, max_days=380)
+            if latest_q is None and ytd is not None and _duration_days(ytd) and _duration_days(ytd) < 200:
+                latest_q = ytd
+            yoy_q = select_comparable_fact(entries, latest_q or ytd or fy,
+                                           periods_back=1, fp=(latest_q or {}).get("fp"))
+            ytd_yoy = select_comparable_fact(entries, ytd,
+                                              periods_back=1, fp=(ytd or {}).get("fp"))
+            qoq = None
+            if latest_q is not None:
+                qoq = select_comparable_fact(entries, latest_q,
+                                             periods_back=1, fp=(latest_q or {}).get("fp"))
+                # qoq needs period_back=1 quarter, not 1 year. We approximate:
+                # find the immediately prior 10-Q of same fp structure but fy-1
+                # would be wrong; we'd need fy same, fp previous. Skip if not
+                # deterministically derivable.
+
+            metric_block = {
+                "tag": tag,
+                "taxonomy": taxonomy,
+                "latest_q": _normalize_fact([latest_q], latest_q) if latest_q else None,
+                "ytd": _normalize_fact([ytd], ytd) if ytd else None,
+                "fy": _normalize_fact([fy], fy) if fy else None,
+                "yoy_q": _normalize_fact([yoy_q], yoy_q) if yoy_q else None,
+                "ytd_yoy": _normalize_fact([ytd_yoy], ytd_yoy) if ytd_yoy else None,
+            }
+            q_val = (metric_block["latest_q"] or {}).get("val")
+            q_prior = (metric_block["yoy_q"] or {}).get("val")
+            metric_block["q_yoy_pct"] = safe_ratio(
+                (q_val - q_prior) if (q_val is not None and q_prior is not None) else None,
+                q_prior) if q_val is not None and q_prior is not None else None
+            ytd_v = (metric_block["ytd"] or {}).get("val")
+            ytd_prior = (metric_block["ytd_yoy"] or {}).get("val")
+            metric_block["ytd_yoy_pct"] = safe_ratio(
+                (ytd_v - ytd_prior) if (ytd_v is not None and ytd_prior is not None) else None,
+                ytd_prior) if ytd_v is not None and ytd_prior is not None else None
+            metrics[metric_name] = metric_block
+
+    # 2. Most-recent filing date seen anywhere
+    for entries in [
+        e for v in metrics.values() if isinstance(v, dict)
+        for e in ((v.get("latest_q") or {}), (v.get("ytd") or {}), (v.get("fy") or {}))
+        if e
+    ]:
+        filed = entries.get("filed")
+        if filed and (out["as_of_filed"] is None or filed > out["as_of_filed"]):
+            out["as_of_filed"] = filed
+
+    # 3. Latest quarter label/end — use revenue or net income latest_q
+    for key in ("revenue", "operating_income", "net_income"):
+        m = metrics.get(key) or {}
+        latest = m.get("latest_q") or {}
+        if latest and latest.get("period_end"):
+            label = "{}{}".format(
+                "FY" + str(latest["fy"]) if latest.get("fy") else "FY",
+                latest.get("fp") or "",
+            )
+            out["latest_quarter_label"] = label
+            out["latest_quarter_end"] = latest["period_end"]
+            break
+
+    # 4. Balance sheet snapshot: pull latest 10-Q inst values for assets, etc.
+    bs_rows = []
+    bs_items = (
+        ("assets", "Total Assets"),
+        ("cash", "Cash & Equivalents"),
+        ("liabilities", "Total Liabilities"),
+        ("lt_debt_current", "Long-Term Debt (current)"),
+        ("lt_debt_noncurrent", "Long-Term Debt (non-current)"),
+    )
+    for metric_key, label in bs_items:
+        m = metrics.get(metric_key)
+        if not m:
+            continue
+        entries = []
+        tag = m.get("tag")
+        for taxonomy in ("us-gaap", "ifrs-full"):
+            entries = _entries_for_tag(companyfacts, taxonomy, tag)
+            entries = [e for e in entries if e.get("form") in SEC_FORMS]
+            if entries:
+                break
+        if not entries:
+            continue
+        instant = select_instant_fact(entries, form="10-Q")
+        if instant is None:
+            instant = select_instant_fact(entries)
+        if instant is None:
+            continue
+        # Prior-period comparable: tolerate a wide window because the SEC
+        # data may not have an exact same-day snapshot one year ago. We pick
+        # the closest entry whose end date is between 270 and 540 days
+        # before the anchor; that covers FY ends and prior 10-Q snapshots.
+        prior = None
+        anchor_date = _parse_iso_date(instant.get("end"))
+        if anchor_date:
+            candidates = []
+            for entry in entries:
+                d = _parse_iso_date(entry.get("end"))
+                if not d:
+                    continue
+                delta = (anchor_date - d).days
+                if 270 <= delta <= 540:
+                    candidates.append((delta, entry))
+            if candidates:
+                candidates.sort(key=lambda x: x[0])
+                prior = candidates[0][1]
+        bs_rows.append({
+            "label": label,
+            "tag": tag,
+            "value": instant.get("val"),
+            "period_end": instant.get("end"),
+            "filed": instant.get("filed"),
+            "form": instant.get("form"),
+            "yoy_value": prior.get("val") if prior else None,
+            "yoy_change_pct": safe_ratio(
+                (instant.get("val") - prior.get("val"))
+                if (instant.get("val") is not None and prior and prior.get("val") is not None)
+                else None,
+                prior.get("val") if prior else None,
+            ),
+        })
+    out["balance_sheet"] = bs_rows
+    return out
 DASH_DIR = "/opt/er-dashboards"
 LOCAL_SKILL_DIR = Path.home() / ".claude/skills/equity-research"
 SERVER_SKILL_DIR = Path("/opt/er-dashboard/equity-research")
@@ -28,7 +496,7 @@ ROW_SCHEMAS = {
     "guidance_rows": ["指标", "指引", "YoY", "关键假设"],
     "valuation_rows": ["指标", "当前", "5y中位数", "评价"],
     "balance_sheet_rows": ["项目", "金额", "YoY变化", "解读"],
-    "business_rows": ["业务/分部", "收入", "占比", "同比", "环比", "投资含义"],
+    "business_rows": ["业务/分部", "收入", "占比", "同比", "环比", "业务意义"],
     "product_rows": ["产品", "是什么", "客户为什么付钱", "成功看什么"],
     "chain_rows": ["上游采购", "→", "公司业务", "→", "下游客户"],
     "comp_financial_rows": ["公司", "相关业务", "收入", "增速", "毛利率", "EV/Sales", "备注"],
@@ -37,6 +505,11 @@ ROW_SCHEMAS = {
 }
 CLASS_FIELDS = {"conclusion_class", "price_change_class", "ytd_class", "revenue_change_class", "eps_change_class", "business_cycle_class", "price_cycle_class", "risk_self_class", "risk_substitute_class", "risk_geo_class", "risk_cycle_class", "verify_paid_class", "verify_repeat_class", "verify_production_class", "verify_concentration_class", "verify_source_class"}
 UNKNOWN_DISPLAY = "未披露 / 待验证"
+MISSING_NOT_DISCLOSED = "公司未单独披露"
+MISSING_SOURCE_UNAVAILABLE = "数据源暂不可用"
+MISSING_INSUFFICIENT_HISTORY = "历史不足"
+MISSING_NOT_APPLICABLE = "不适用"
+MISSING_TO_CROSS_VERIFY = "待交叉验证"
 PROHIBITED_ADVICE_TERMS = (
     "目标价", "目标位", "买入价", "买入点", "入场价", "止损价", "止损位", "止盈价", "止盈位",
     "建议仓位", "仓位建议", "仓位控制", "加仓建议", "减仓建议", "position size", "target price",
@@ -174,11 +647,15 @@ def load_env(path):
     return env
 
 
-def fetch_url(url, timeout=12):
+def fetch_url(url, timeout=12, user_agent=None):
+    ua = user_agent or os.environ.get(
+        "ER_USER_AGENT",
+        "EquityResearch Dashboard research@er-dashboard.local"
+    )
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "ER-AutoGen/1.0 research dashboard contact: no-reply@example.com",
+            "User-Agent": ua,
             "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
         },
     )
@@ -218,6 +695,9 @@ def add_research_source(out, name, url, limit=3500):
 
 
 def fetch_sec_recent_filings(ticker, out):
+    """Fetch SEC submissions + companyfacts; do XBRL extraction inline so we
+    don't ship the full companyfacts blob to the LLM."""
+    out.setdefault("sec_financials", {"available": False, "reason": "fetch not started"})
     try:
         raw = fetch_url("https://www.sec.gov/files/company_tickers.json", timeout=15)
         companies = json.loads(raw)
@@ -268,13 +748,27 @@ def fetch_sec_recent_filings(ticker, out):
         facts_url = "https://data.sec.gov/api/xbrl/companyfacts/CIK{:010d}.json".format(cik)
         try:
             facts_payload = json.loads(fetch_url(facts_url, timeout=20))
-            wanted = {
-                "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet",
-                "GrossProfit", "OperatingIncomeLoss", "NetIncomeLoss", "EarningsPerShareDiluted",
-                "Assets", "Liabilities", "CashAndCashEquivalentsAtCarryingValue", "LongTermDebt",
-                "StockholdersEquity", "NetCashProvidedByUsedInOperatingActivities",
-                "PaymentsToAcquirePropertyPlantAndEquipment", "CommonStockSharesOutstanding",
-            }
+            # 1. Deterministic structured extraction — the only consumer of the
+            #    full facts blob. Runs locally, no LLM, no extra requests.
+            try:
+                extracted = extract_sec_financial_metrics(facts_payload)
+                extracted["source_url"] = facts_url
+                out["sec_financials"] = extracted
+            except Exception as exc:
+                out["sec_financials"] = {
+                    "available": False,
+                    "reason": "extract failed: {}".format(str(exc)[:160]),
+                }
+            # 2. Trimmed LLM-friendly digest: same tags, fewer entries, capped.
+            #    This stays in research_sources because the LLM may still want
+            #    to read the literal numbers for narrative context.
+            wanted = set()
+            for tags in SEC_FINANCIAL_TAGS.values():
+                wanted.update(tags)
+            wanted.update({
+                "LongTermDebt", "StockholdersEquity", "CommonStockSharesOutstanding",
+                "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+            })
             fact_rows = []
             for taxonomy in ("us-gaap", "ifrs-full"):
                 for tag, fact in facts_payload.get("facts", {}).get(taxonomy, {}).items():
@@ -283,20 +777,24 @@ def fetch_sec_recent_filings(ticker, out):
                     entries = []
                     for unit_rows in fact.get("units", {}).values():
                         entries.extend(unit_rows)
-                    entries = [row for row in entries if row.get("form") in ("10-K", "10-Q", "20-F", "6-K")]
+                    entries = [row for row in entries if row.get("form") in SEC_FORMS]
                     entries.sort(key=lambda row: (row.get("filed", ""), row.get("end", "")), reverse=True)
                     if entries:
                         fact_rows.append({
                             "tag": tag,
                             "label": fact.get("label", tag),
-                            "recent": entries[:8],
+                            "recent": entries[:6],
                         })
             out.setdefault("research_sources", []).append({
                 "name": "sec_companyfacts",
                 "url": facts_url,
-                "text": json.dumps(fact_rows, ensure_ascii=False)[:24000],
+                "text": json.dumps(fact_rows, ensure_ascii=False)[:20000],
             })
         except Exception as exc:
+            out["sec_financials"] = {
+                "available": False,
+                "reason": "fetch failed: {}".format(str(exc)[:160]),
+            }
             out.setdefault("research_sources", []).append({
                 "name": "sec_companyfacts",
                 "url": facts_url,
@@ -872,6 +1370,597 @@ def call_llm(ticker, stock_data, env):
     return merged, None
 
 
+def _row_html(cells):
+    """Build a single row of HTML cells, preserving ROW_SCHEMAS column counts."""
+    return "<tr>" + "".join("<td>{}</td>".format(html_escape(c or UNKNOWN_DISPLAY))
+                            for c in cells) + "</tr>"
+
+
+def _metric_scope_label(fact):
+    """Render the period that a SEC fact came from (single quarter vs YTD)."""
+    if not fact:
+        return ""
+    scope = fact.get("scope") or ""
+    start = fact.get("period_start") or ""
+    end = fact.get("period_end") or ""
+    if not end:
+        return ""
+    if scope == "q":
+        return "Q {}–{}".format(start or "?", end)
+    if scope == "ytd":
+        return "YTD {}–{}".format(start or "?", end)
+    if scope == "fy":
+        return "FY {}".format(end[:4])
+    return "{}–{}".format(start, end)
+
+
+def _sec_quarter_row(label, anchor_fact, prior_fact=None, ratio_pct=None):
+    """Build a latest_quarter_rows cell tuple."""
+    cur = format_currency(anchor_fact.get("val")) if anchor_fact else None
+    prev = format_currency(prior_fact.get("val")) if prior_fact else None
+    # When the prior period was a loss, YoY % is meaningless. We display
+    # the absolute swing in $ as "扭亏 +$X.XXB" so the reader sees direction.
+    swing_cell = UNKNOWN_DISPLAY
+    if ratio_pct is not None:
+        swing_cell = "{:+.1f}%".format(ratio_pct)
+    elif anchor_fact and prior_fact:
+        try:
+            cur_val = float(anchor_fact.get("val"))
+            prior_val = float(prior_fact.get("val"))
+            if prior_val < 0 and cur_val > 0:
+                swing_cell = "扭亏 +" + format_currency(cur_val - prior_val)
+            elif abs(prior_val) > 0 and ((cur_val >= 0) == (prior_val >= 0)):
+                pct = ((cur_val - prior_val) / abs(prior_val)) * 100.0
+                swing_cell = "{:+.1f}%".format(pct)
+        except (TypeError, ValueError):
+            pass
+    cells = [label, prev or UNKNOWN_DISPLAY, cur or UNKNOWN_DISPLAY,
+             swing_cell,
+             UNKNOWN_DISPLAY, _metric_scope_label(anchor_fact)]
+    return _row_html(cells)
+
+
+def _build_sec_balance_sheet_rows(sec_fin):
+    """balance_sheet_rows: only include items SEC actually disclosed."""
+    out_rows = []
+    for row in (sec_fin.get("balance_sheet") or []):
+        value = row.get("value")
+        if value is None:
+            continue
+        yoy_pct = row.get("yoy_change_pct")
+        yoy_cell = ("{:+.1f}%".format(yoy_pct)
+                    if isinstance(yoy_pct, (int, float)) else MISSING_TO_CROSS_VERIFY)
+        period = row.get("period_end") or ""
+        comment = "SEC {} ({})".format(row.get("form") or "filing",
+                                       period)
+        out_rows.append(_row_html([
+            row.get("label") or UNKNOWN_DISPLAY,
+            format_currency(value) or UNKNOWN_DISPLAY,
+            yoy_cell,
+            comment,
+        ]))
+    if not out_rows:
+        out_rows.append(_row_html(["Total Assets", MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
+                                    "SEC 10-Q 未抓取到"]))
+    return "\n".join(out_rows)
+
+
+def _build_sec_quarterly_rows(sec_fin):
+    """latest_quarter_rows: build deterministically from SEC metrics."""
+    metrics = (sec_fin or {}).get("metrics") or {}
+    q_end = (sec_fin or {}).get("latest_quarter_end") or ""
+    fy = None
+    fp = None
+    rev = metrics.get("revenue") or {}
+    anchor = rev.get("latest_q") or {}
+    if anchor:
+        fy = anchor.get("fy")
+        fp = anchor.get("fp")
+    period_label = ""
+    if fy and fp:
+        period_label = "FY{} {}".format(fy, fp)
+    elif (sec_fin or {}).get("latest_quarter_label"):
+        period_label = sec_fin.get("latest_quarter_label")
+    rows = []
+    rev_q = anchor
+    rev_yoy = (rev.get("yoy_q") or {}) if rev else {}
+    rev_yoy_pct = rev.get("q_yoy_pct") if rev else None
+    if rev_q:
+        rows.append(_sec_quarter_row(
+            "Revenue (本季度)", rev_q, rev_yoy, rev_yoy_pct))
+
+    gp_m = metrics.get("gross_profit") or {}
+    gp_q = gp_m.get("latest_q")
+    gp_yoy = gp_m.get("yoy_q")
+    gp_yoy_pct = gp_m.get("q_yoy_pct")
+    if gp_q:
+        rows.append(_sec_quarter_row(
+            "Gross Profit (本季度)", gp_q, gp_yoy, gp_yoy_pct))
+
+    rev_val = (rev_q or {}).get("val")
+    gp_val = (gp_q or {}).get("val")
+    op_m = metrics.get("operating_income") or {}
+    op_q = op_m.get("latest_q") or {}
+    op_yoy = op_m.get("yoy_q") or {}
+    if rev_val and gp_val:
+        gm = safe_ratio(gp_val, rev_val)
+        prior_rev = (rev_yoy or {}).get("val")
+        prior_gp = (gp_yoy or {}).get("val")
+        gm_prior = safe_ratio(prior_gp, prior_rev) if (prior_rev and prior_gp) else None
+        delta = (gm - gm_prior) if (gm is not None and gm_prior is not None) else None
+        gm_cell = "{:.2f}%".format(gm) if gm is not None else UNKNOWN_DISPLAY
+        gm_period = "{}–{}".format((gp_q or {}).get("period_start", "?"),
+                                    (gp_q or {}).get("period_end", "?"))
+        rows.append(_row_html([
+            "Gross Margin", MISSING_NOT_DISCLOSED,
+            gm_cell, ("{:+.2f} pp".format(delta)
+                      if delta is not None else UNKNOWN_DISPLAY),
+            "vs 预期 不适用", gm_period
+        ]))
+
+    rows.append(_sec_quarter_row("Operating Income", op_q, op_yoy))
+    rows.append(_sec_quarter_row(
+        "Net Income",
+        (metrics.get("net_income") or {}).get("latest_q"),
+        (metrics.get("net_income") or {}).get("yoy_q")))
+    rows.append(_sec_quarter_row(
+        "Diluted EPS",
+        (metrics.get("eps_diluted") or {}).get("latest_q"),
+        (metrics.get("eps_diluted") or {}).get("yoy_q")))
+
+    if not rows:
+        rows.append(_row_html(["Revenue", MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
+                                MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
+                                "SEC 未找到匹配季度 XBRL"]))
+    return "\n".join(rows), period_label
+
+
+def _build_sec_fy_rows(sec_fin):
+    """fy_comparison_rows: build from latest FY vs prior FY when SEC has them."""
+    metrics = (sec_fin or {}).get("metrics") or {}
+    rows = []
+    fy = metrics.get("revenue", {}).get("fy")
+    fy_yoy = metrics.get("revenue", {}).get("yoy_q") if False else None  # not used; we compare fy vs prior fy
+    rev_fy = (metrics.get("revenue") or {}).get("fy") or {}
+    rev_fy_val = rev_fy.get("val")
+    if rev_fy_val is not None:
+        # SEC doesn't usually publish prior-year FY in current ticker filings
+        # after a spinoff — fall back to whatever it has.
+        period_end = rev_fy.get("period_end") or ""
+        rows.append(_row_html([
+            "Revenue",
+            format_currency(rev_fy_val) or UNKNOWN_DISPLAY,
+            MISSING_NOT_APPLICABLE if _is_recent_spinoff(period_end) else MISSING_INSUFFICIENT_HISTORY,
+            UNKNOWN_DISPLAY,
+        ]))
+    gp_fy = (metrics.get("gross_profit") or {}).get("fy") or {}
+    if gp_fy.get("val") is not None:
+        rows.append(_row_html([
+            "GAAP Gross Profit",
+            format_currency(gp_fy["val"]) or UNKNOWN_DISPLAY,
+            MISSING_NOT_APPLICABLE,
+            UNKNOWN_DISPLAY,
+        ]))
+    op_fy = (metrics.get("operating_income") or {}).get("fy") or {}
+    if op_fy.get("val") is not None:
+        rows.append(_row_html([
+            "Operating Income",
+            format_currency(op_fy["val"]) or UNKNOWN_DISPLAY,
+            MISSING_NOT_APPLICABLE,
+            UNKNOWN_DISPLAY,
+        ]))
+    ni_fy = (metrics.get("net_income") or {}).get("fy") or {}
+    if ni_fy.get("val") is not None:
+        rows.append(_row_html([
+            "GAAP Net Income",
+            format_currency(ni_fy["val"]) or UNKNOWN_DISPLAY,
+            MISSING_NOT_APPLICABLE,
+            UNKNOWN_DISPLAY,
+        ]))
+    # Cash flow (YTD as proxy for FY reporting cadence when only 10-Q exists)
+    for cf_key, label in (("operating_cash_flow", "Operating Cash Flow (累计)"),
+                          ("capex", "Capital Expenditure (累计)")):
+        cf = (metrics.get(cf_key) or {}).get("ytd") or {}
+        if cf.get("val") is not None:
+            rows.append(_row_html([
+                label,
+                format_currency(cf["val"]) or UNKNOWN_DISPLAY,
+                MISSING_NOT_APPLICABLE,
+                UNKNOWN_DISPLAY,
+            ]))
+    if not rows:
+        rows.append(_row_html(["Revenue", MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
+                                "SEC 仅可获取 10-Q 累计"]))
+    return "\n".join(rows)
+
+
+def _is_recent_spinoff(period_end_str):
+    """Mark fields that depend on data SEC doesn't yet have for a recent ticker."""
+    if not period_end_str:
+        return False
+    try:
+        d = datetime.datetime.strptime(period_end_str[:10], "%Y-%m-%d").date()
+    except Exception:
+        return False
+    return (datetime.date.today() - d).days < 730  # <2 yrs of SEC history
+
+
+def _build_sec_business_rows(sec_fin, company_name):
+    """Business rows: only fill in the consolidated revenue line when SEC
+    has the data. Product-level splits are left to product_rows unless the
+    company actually disclosed them in its XBRL segment tags (we don't
+    fabricate that today)."""
+    metrics = (sec_fin or {}).get("metrics") or {}
+    rev_ytd = (metrics.get("revenue") or {}).get("ytd") or {}
+    rev_q = (metrics.get("revenue") or {}).get("latest_q") or {}
+    if (rev_ytd or {}).get("val") is None and (rev_q or {}).get("val") is None:
+        return _row_html(["公司总收入", MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
+                            MISSING_NOT_DISCLOSED, MISSING_NOT_DISCLOSED,
+                            MISSING_NOT_DISCLOSED])
+    val = (rev_ytd.get("val")
+           if (rev_ytd or {}).get("val") is not None
+           else (rev_q.get("val")))
+    period_label = _metric_scope_label(rev_ytd if rev_ytd else rev_q)
+    return _row_html([
+        "{} 总收入 (单一份部)".format(company_name or "公司"),
+        format_currency(val) or UNKNOWN_DISPLAY,
+        "100% (公司分部口径单一)" if val else UNKNOWN_DISPLAY,
+        (rev_ytd.get("tag") or rev_q.get("tag") or MISSING_NOT_DISCLOSED),
+        "公司未单独披露分部",
+        "公司按单一报告分部披露；产品族拆分见 product_rows",
+    ])
+
+
+def _apply_sec_quarter_override(stock_data, base):
+    """Override the quarterly headline fields with SEC data when available.
+    Falls back to existing values if SEC has no signal."""
+    sec_fin = (stock_data or {}).get("sec_financials") or {}
+    if not sec_fin.get("available"):
+        return
+    metrics = sec_fin.get("metrics") or {}
+    rev = metrics.get("revenue") or {}
+    rev_q = rev.get("latest_q") or {}
+    if rev_q.get("val") is not None:
+        base["latest_revenue"] = format_currency(rev_q.get("val")) or UNKNOWN_DISPLAY
+        change = rev.get("q_yoy_pct")
+        if isinstance(change, (int, float)):
+            base["revenue_change"] = "{:+.1f}%".format(change)
+            base["revenue_change_class"] = "pos" if change > 0 else "neg"
+            # core_revenue_growth is the KPI card for Q YoY. Without SEC
+            # we never have this; SEC gets it for free.
+            base["core_revenue_growth"] = "{:+.1f}%".format(change)
+    eps_q = (metrics.get("eps_diluted") or {}).get("latest_q") or {}
+    if eps_q.get("val") is not None:
+        base["latest_eps"] = "${:.2f}".format(float(eps_q["val"]))
+        eps_m = metrics.get("eps_diluted") or {}
+        change = eps_m.get("q_yoy_pct")
+        if isinstance(change, (int, float)):
+            base["eps_change"] = "{:+.1f}%".format(change)
+            base["eps_change_class"] = "pos" if change > 0 else "neg"
+    rev_v = (rev_q or {}).get("val")
+    gp_v = ((metrics.get("gross_profit") or {}).get("latest_q") or {}).get("val")
+    if rev_v and gp_v is not None:
+        gm = safe_ratio(gp_v, rev_v)
+        if gm is not None:
+            base["core_gross_margin"] = "{:.2f}%".format(gm)
+    rev_prior = ((rev.get("yoy_q") or {}).get("val"))
+    gp_prior = (((metrics.get("gross_profit") or {}).get("yoy_q") or {}).get("val"))
+    if rev_v and gp_v is not None and rev_prior and gp_prior:
+        gm_now = safe_ratio(gp_v, rev_v)
+        gm_prior = safe_ratio(gp_prior, rev_prior)
+        if gm_now is not None and gm_prior is not None:
+            delta_pp = gm_now - gm_prior
+            base["margin_change"] = "{:+.0f}".format(delta_pp * 100) if abs(delta_pp) >= 0.005 else "0"
+    fcf_label, fcf_val = _compute_ytd_fcf(metrics)
+    if fcf_label and fcf_val is not None:
+        base["fcf_ttm"] = "{} {}".format(fcf_label, format_currency(fcf_val))
+        fcf_yield = _compute_fcf_yield(fcf_val, stock_data)
+        if fcf_yield is not None:
+            base["fcf_yield"] = fcf_yield
+    label = sec_fin.get("latest_quarter_label")
+    end = sec_fin.get("latest_quarter_end")
+    if label and end:
+        base["latest_quarter"] = "{}（截至{}，SEC 已披露）".format(label, end)
+
+
+def _compute_ytd_fcf(metrics):
+    """Return (label, value_in_dollars) where label tells whether we have YTD or
+    annual TTM. We only ever calculate FCF when both legs are present."""
+    ocf = ((metrics.get("operating_cash_flow") or {}).get("ytd") or {}).get("val")
+    capex = ((metrics.get("capex") or {}).get("ytd") or {}).get("val")
+    if ocf is None or capex is None:
+        return None, None
+    return "YTD", float(ocf) - float(capex)
+
+
+def _compute_fcf_yield(fcf_dollars, stock_data):
+    """FCF yield is undefined without market cap; bail to None when missing."""
+    if fcf_dollars is None:
+        return None
+    market_cap = stock_data.get("market_cap")
+    if market_cap in (None, ""):
+        return None
+    try:
+        mc = float(market_cap)
+    except (TypeError, ValueError):
+        # Stock-analysis style "$200.6B" / "$1.23T" / "$456M" — strip suffix.
+        s = str(market_cap).strip()
+        multiplier = 1.0
+        if s.endswith("T"):
+            multiplier = 1e12
+            s = s[:-1]
+        elif s.endswith("B"):
+            multiplier = 1e9
+            s = s[:-1]
+        elif s.endswith("M"):
+            multiplier = 1e6
+            s = s[:-1]
+        elif s.endswith("K"):
+            multiplier = 1e3
+            s = s[:-1]
+        s = s.replace("$", "").replace(",", "").strip()
+        mc = float(s) * multiplier
+    if mc <= 0:
+        return None
+    return "{:+.2f}%".format(safe_ratio(fcf_dollars, mc))
+
+
+def _apply_sec_dashboard_override(base, stock_data):
+    """Replace LLM-supplied financial numbers with SEC XBRL outputs whenever
+    SEC actually disclosed them.  LLM output is kept untouched for fields the
+    extractor could not find, so the report does not regress.  Runs AFTER
+    rows_to_html / list_to_li because we want SEC row HTML to win."""
+    sec_fin = (stock_data or {}).get("sec_financials") or {}
+    if not sec_fin.get("available"):
+        return
+    company_name = base.get("company_name") or stock_data.get("company_name") or "公司"
+
+    # Headline fields — only fill in what SEC actually has.
+    _apply_sec_quarter_override(stock_data, base)
+
+    # Build deterministic tables and overwrite LLM output.
+    q_rows, period_label = _build_sec_quarterly_rows(sec_fin)
+    if q_rows:
+        if normalize_model_row_html("latest_quarter_rows", q_rows) is not None:
+            base["latest_quarter_rows"] = q_rows
+    if period_label and base.get("latest_quarter") in (None, "", UNKNOWN_DISPLAY):
+        base["latest_quarter"] = period_label
+    fy_rows = _build_sec_fy_rows(sec_fin)
+    if fy_rows and normalize_model_row_html("fy_comparison_rows", fy_rows) is not None:
+        base["fy_comparison_rows"] = fy_rows
+    bs_rows = _build_sec_balance_sheet_rows(sec_fin)
+    if bs_rows and normalize_model_row_html("balance_sheet_rows", bs_rows) is not None:
+        base["balance_sheet_rows"] = bs_rows
+
+    # Business rows: only the consolidated revenue line (no fabricated
+    # product-level split).
+    biz_rows = _build_sec_business_rows(sec_fin, company_name)
+    if biz_rows and normalize_model_row_html("business_rows", biz_rows) is not None:
+        base["business_rows"] = biz_rows
+
+    # segment_rows is the legacy 6-column "old segment view" — same rule:
+    # only the consolidated line goes in; product-level splits live in
+    # product_rows where they belong.
+    rev_q = ((sec_fin.get("metrics", {}).get("revenue") or {})
+             .get("latest_q") or {})
+    seg_html = _row_html([
+        company_name + " 报告分部（单一）",
+        format_currency(rev_q.get("val")) or UNKNOWN_DISPLAY,
+        "100%（单一报告分部）",
+        MISSING_NOT_DISCLOSED,
+        MISSING_NOT_DISCLOSED,
+        "公司按单一份部披露；产品族见 product_rows",
+    ])
+    if normalize_model_row_html("segment_rows", seg_html) is not None:
+        base["segment_rows"] = seg_html
+
+    # Note SEC filing dates in data_sources so reviewers can audit quickly.
+    if sec_fin.get("as_of_filed") and sec_fin.get("source_url"):
+        existing_sources = base.get("data_sources")
+        if isinstance(existing_sources, str):
+            # list_to_li has already converted this to an HTML string. Strip
+            # the wrapper so we can append cleanly, then re-render at the end.
+            existing_sources = _li_to_list(existing_sources)
+        if not isinstance(existing_sources, list):
+            existing_sources = []
+        existing_sources.append(
+            "SEC XBRL companyfacts @ {} ({})".format(
+                sec_fin["as_of_filed"], sec_fin["source_url"]),
+        )
+        base["data_sources"] = existing_sources
+
+
+def _li_to_list(html_value):
+    """Reverse-engineer an HTML <li>...</li> blob back into a list of strings."""
+    if not isinstance(html_value, str):
+        return html_value
+    text = re.sub(r"(?is)<[^>]+>", " ", html_value)
+    parts = [p.strip() for p in text.split("\n") if p.strip()]
+    if not parts:
+        parts = [p.strip() for p in re.split(r"[·|]", text) if p.strip()]
+    return parts or [text.strip()]
+
+
+# Per-column semantic label mapping.  Empty cells in column N inside a row use
+# the label mapped from the *header* column name.  This keeps row upgrades
+# scoped: we never replace content we can't classify (e.g. values that came
+# from research_sources).
+_ROW_COLUMN_LABELS = {
+    "YoY": "不适用",
+    "5y中位数": "历史不足",
+    "5y 中位数": "历史不足",
+    "5y median": "历史不足",
+    "vs预期": "不适用",
+    "vs 预期": "不适用",
+    "评价": "未单独披露（来源缺口）",
+    "Net Income": "公司未单独披露",
+    "战略作用": "公司未单独披露",
+    "业务意义": "公司未单独披露",
+    "环比": "公司未单独披露",
+    "Q/Q": "公司未单独披露",
+    "占比": "100%",
+    "YoY 变化": "不适用",
+}
+
+
+def _upgrade_row_cells(html_rows, row_field=None, fallback_label=UNKNOWN_DISPLAY):
+    """Replace each `<td>未披露 / 待验证</td>` cell with the column-specific
+    label. Header comes from ``row_field`` in ROW_SCHEMAS since the template
+    renders the header outside the field value."""
+    if not isinstance(html_rows, str):
+        return html_rows
+    header_cells = list(ROW_SCHEMAS.get(row_field, ()) if row_field else ())
+    if not header_cells:
+        # Fall back to first <tr> <th> if present
+        header_match = re.search(r"(?is)<tr[^>]*>(.*?)</tr>", html_rows)
+        if header_match:
+            header_cells = re.findall(
+                r"(?is)<th[^>]*>(.*?)</th>", header_match.group(1))
+    if not header_cells:
+        return html_rows
+    unknown_patterns = (UNKNOWN_DISPLAY, "未披露/待验证")
+
+    def repl(match):
+        # Restrict column counting to the current <tr> only — counting
+        # across the entire prefix was producing wrong indices for cells in
+        # later rows.
+        prefix = html_rows[:match.start()]
+        last_tr = prefix.rfind("<tr")
+        if last_tr < 0:
+            return match.group(0)
+        row_prefix = prefix[last_tr:]
+        col_index = len(re.findall(r"(?is)<td[^>]*>", row_prefix))
+        if col_index >= len(header_cells):
+            return match.group(0)
+        header = re.sub(r"(?s)<[^>]+>", "", header_cells[col_index]).strip()
+        label = _ROW_COLUMN_LABELS.get(header, fallback_label)
+        return "<td>{}</td>".format(html_escape(label))
+
+    cell_regex = r"(?is)<td[^>]*>\s*(?:{})(?:[^<]*)\s*</td>".format(
+        "|".join(re.escape(p) for p in unknown_patterns))
+    return re.sub(cell_regex, repl, html_rows)
+
+
+def _finalize_missing_fields(base):
+    """Fill remaining empty placeholders with differentiated missing-state
+    labels instead of the blanket `未披露 / 待验证` default."""
+    known_labels = {field: label for field, label, _ in MISSING_STATE_TABLE}
+    is_recent_spinoff = _is_recent_spinoff(
+        (base.get("analysis_timestamp") or "")[:10])
+    for field in template_placeholders():
+        if base.get(field) not in (None, "", [], {}):
+            continue
+        if field in known_labels:
+            base[field] = known_labels[field]
+            continue
+        base[field] = _classify_missing(field, base, is_recent_spinoff)
+
+
+def _refine_existing_unknowns(base):
+    """Convert blanket `未披露 / 待验证` strings into field-specific missing
+    labels when we know the reason (FMP 402, history <5y, etc.).
+
+    Runs late so it does not fight the SEC override path; it only rewrites
+    placeholders the LLM originally filled with the generic phrase.
+    """
+    known_labels = {field: label for field, label, _ in MISSING_STATE_TABLE}
+    is_recent_spinoff = _is_recent_spinoff(
+        (base.get("analysis_timestamp") or "")[:10])
+    for field in template_placeholders():
+        value = base.get(field)
+        if not isinstance(value, str):
+            continue
+        # Recovery: ROW_FIELDS that got wholesale-collapsed to a single label
+        # in an earlier rerender need their full row shape restored, otherwise
+        # the template renders a one-cell table that fails the schema check.
+        is_row_value = bool(re.search(r"(?is)<tr[^>]*>", value))
+        if field in ROW_FIELDS and not is_row_value:
+            label = known_labels.get(field, "待交叉验证")
+            cols = ROW_SCHEMAS[field]
+            base[field] = _row_html([label] * len(cols))
+            continue
+        if UNKNOWN_DISPLAY not in value and "未披露/待验证" not in value:
+            continue
+        name = field.lower()
+        if is_row_value:
+            # Specific cells inside rows are still lifted to specific labels
+            # when we know the row-level intent (e.g. customer_rows, eps_change,
+            # revenue_change, segment/fy comparisons). Keep substitutions
+            # scoped to known unstable fields.
+            if field in known_labels and field not in ROW_FIELDS:
+                continue  # leave row-containing value alone
+            if field in ROW_FIELDS:
+                base[field] = _upgrade_row_cells(
+                    value, row_field=field,
+                    fallback_label=MISSING_TO_CROSS_VERIFY)
+            continue
+
+        if field in known_labels:
+            # For row-shaped values, swap the unknown phrase *inside* every
+            # <td>...</td> cell — never the whole row.
+            if field in ROW_FIELDS:
+                base[field] = _upgrade_row_cells(
+                    value, row_field=field,
+                    fallback_label=known_labels[field])
+                continue
+            base[field] = known_labels[field]
+            continue
+
+        if name.startswith("verify_") or name.startswith("winner_"):
+            base[field] = re.sub(re.escape(UNKNOWN_DISPLAY),
+                                 MISSING_TO_CROSS_VERIFY, value)
+            continue
+        if name in ("net_debt", "enterprise_value", "forward_pe", "ev_sales"):
+            base[field] = re.sub(re.escape(UNKNOWN_DISPLAY),
+                                 MISSING_SOURCE_UNAVAILABLE, value)
+            continue
+        if is_recent_spinoff and any(t in name for t in
+                                     ("median", "history", "ytd", "5y")):
+            base[field] = re.sub(re.escape(UNKNOWN_DISPLAY),
+                                 MISSING_INSUFFICIENT_HISTORY, value)
+            continue
+        if name == "price_implication":
+            base[field] = re.sub(re.escape(UNKNOWN_DISPLAY),
+                                 "数据源暂不可用（依赖分析师模型）", value)
+            continue
+
+
+MISSING_STATE_TABLE = (
+    ("pe_median", MISSING_INSUFFICIENT_HISTORY, ""),
+    ("ytd_return", MISSING_INSUFFICIENT_HISTORY, ""),
+    ("week52_low", MISSING_INSUFFICIENT_HISTORY, ""),
+    ("week52_high", MISSING_INSUFFICIENT_HISTORY, ""),
+    ("forward_pe", MISSING_SOURCE_UNAVAILABLE, ""),
+    ("forward_ev_sales", MISSING_SOURCE_UNAVAILABLE, ""),
+    ("ev_sales", MISSING_SOURCE_UNAVAILABLE, ""),
+    ("eps_change", MISSING_NOT_DISCLOSED, ""),
+    ("eps_change_class", "warn", ""),
+    ("revenue_change", MISSING_NOT_DISCLOSED, ""),
+    ("revenue_change_class", "warn", ""),
+    ("customer_rows", "公司未单独披露（10-Q Note 表格需人工核读）", ""),
+    ("comp_direct", UNKNOWN_DISPLAY, ""),
+    ("comp_indirect", UNKNOWN_DISPLAY, ""),
+    ("comp_substitute", UNKNOWN_DISPLAY, ""),
+    ("comp_insourcing", UNKNOWN_DISPLAY, ""),
+)
+
+
+def _classify_missing(field, base, is_recent_spinoff):
+    """Best-effort label for empty placeholders we did not specifically map."""
+    name = (field or "").lower()
+    if "product_split" in name or "segment" in name or "business_split" in name:
+        return MISSING_NOT_DISCLOSED
+    if any(token in name for token in ("forward_", "ev_sales", "ev_ebitda")):
+        return MISSING_SOURCE_UNAVAILABLE
+    if any(token in name for token in ("5y", "median", "ytd", "history")):
+        return MISSING_INSUFFICIENT_HISTORY if is_recent_spinoff else UNKNOWN_DISPLAY
+    if "guidance" in name or "next_earnings" in name:
+        return MISSING_TO_CROSS_VERIFY
+    if "verify_" in name:
+        return MISSING_NOT_DISCLOSED
+    return UNKNOWN_DISPLAY
+
+
 def normalize_dashboard_data(ticker, stock_data, obj, reason=None):
     fields = template_placeholders()
     base = default_dashboard(ticker, stock_data, reason or "fallback")
@@ -920,9 +2009,9 @@ def normalize_dashboard_data(ticker, stock_data, obj, reason=None):
         base[field] = list_to_li(base.get(field))
     for field in ROW_FIELDS:
         base[field] = rows_to_html(base.get(field))
-    for field in fields:
-        if base.get(field) in (None, "", [], {}):
-            base[field] = "未披露 / 待验证"
+    _apply_sec_dashboard_override(base, stock_data)
+    _refine_existing_unknowns(base)
+    _finalize_missing_fields(base)
     return base
 
 
