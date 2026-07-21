@@ -1,0 +1,128 @@
+name: daily-stock-analysis-orbstack
+
+# ============================================================
+# OrbStack 本地预发布环境
+#
+# 严格隔离约束（与生产 docker-compose.yml / docker-compose.server-image.yml 完全独立）：
+# - 不启动 telegram-bot 服务（避免与生产 Bot 同一 Token 多实例冲突）。
+# - 不启动 cloudflared、不挂载任何 SSH 反向隧道配置。
+# - 禁用定时任务、自动分析、推送通知：scheduler / WebUI 调度器都不会被接管。
+# - 仅绑定 127.0.0.1，避免误暴露到局域网。
+# - restart: no — 本机手动 up/down，不会因 Docker daemon 自启而意外拉起。
+# - 所有数据、日志、报告落到 .orbstack/，与生产 data/ logs/ reports/ 完全隔离。
+#
+# 与生产 compose 共用同一份源码构建，但容器名、端口、数据目录、命令都不同。
+# ============================================================
+
+x-orbstack-common: &orbstack-common
+  restart: "no"
+  init: true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+  # 只用本地占位 env 文件；缺失真实 Key 时允许启动 UI 与 healthcheck。
+  env_file:
+    - ../.env.orbstack.local
+
+services:
+  # ----------------------------------------------------------
+  # DSA 本地预发布：源码构建原生 arm64 镜像（与生产 Dockerfile 共用）
+  # ----------------------------------------------------------
+  dsa-local:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      # OrbStack 在 Apple Silicon 上是 arm64 Linux VM，原生构建无需交叉编译。
+      # 注释保留此声明，让后续切换 buildx / linux/amd64 时一眼能看到。
+      # platforms:
+      #   - linux/arm64
+    image: dsa-local:orbstack
+    container_name: dsa-local
+    # 完全跑在 Linux bridge 上，不使用 network_mode: host。
+    # OpenD 在生产里走 host loopback + SSH 反向隧道；本机由 Mac 原生 OpenD 提供，
+    # 预发布阶段不连接 OpenD（启动时 --no-notify，且本 compose 不暴露 quote 端口）。
+    ports:
+      - "127.0.0.1:18088:8088"
+    volumes:
+      - ../.orbstack/dsa/data:/app/data
+      - ../.orbstack/dsa/logs:/app/logs
+      - ../.orbstack/dsa/reports:/app/reports
+      # strategies 是只读参考，不放本地覆盖。
+      - ../strategies:/app/strategies:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - WEBUI_HOST=0.0.0.0
+      - API_PORT=8088
+      # 本地预发布显式关闭定时与推送：仅 serve-only，不接管 scheduler，不推送通知。
+      - DSA_DISABLE_SCHEDULER=1
+      - DSA_DISABLE_NOTIFY=1
+    command:
+      - python
+      - main.py
+      - --serve-only
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8088"
+      - --no-notify
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:8088/api/health
+          || curl -fsS http://127.0.0.1:8088/health
+          || exit 0
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  # ----------------------------------------------------------
+  # ER Dashboard 本地预发布
+  # ----------------------------------------------------------
+  er-local:
+    build:
+      context: ..
+      dockerfile: ops/er-dashboard/Dockerfile
+    image: er-dashboard-local:orbstack
+    container_name: er-dashboard-local
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      # 看板输出、job 元数据、access log 全部落到本地 .orbstack/er/。
+      - ../.orbstack/er/dashboards:/opt/er-dashboards
+      - ../.orbstack/er/logs:/opt/er-dashboard/logs
+      - ../.orbstack/er/jobs:/opt/er-dashboard/jobs
+      # 源码以 read-only 挂入，trigger.py / SKILL.md 的本地修改立即生效，无需重建镜像。
+      - ../ops/er-dashboard/app.py:/opt/er-dashboard/app.py:ro
+      - ../ops/er-dashboard/trigger.py:/opt/er-dashboard/trigger.py:ro
+      - ../ops/er-dashboard/equity-research:/opt/er-dashboard/equity-research:ro
+      - ../ops/er-dashboard/test_stability.py:/opt/er-dashboard/test_stability.py:ro
+      - ../ops/er-dashboard/test_trigger_stability.py:/opt/er-dashboard/test_trigger_stability.py:ro
+      - ../ops/er-dashboard/test_app_config.py:/opt/er-dashboard/test_app_config.py:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - ER_HOST=0.0.0.0
+      - ER_PORT=8080
+      - ER_DASHBOARD_DIR=/opt/er-dashboards
+      - ER_LOG_FILE=/opt/er-dashboard/logs/access.log
+      - ER_JOB_LOG_FILE=/opt/er-dashboard/logs/jobs.log
+      - ER_TRIGGER_SCRIPT=/opt/er-dashboard/trigger.py
+      - ER_TRIGGER_CWD=/opt/er-dashboard
+      - ER_DSA_URL=http://127.0.0.1:18088/
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

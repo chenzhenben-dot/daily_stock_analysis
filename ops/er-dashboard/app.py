@@ -17,19 +17,22 @@ import subprocess
 import threading
 import uuid
 
-DASH_DIR = "/opt/er-dashboards"
-PORT = 8080
-HOST = "0.0.0.0"
-LOG_FILE = "/opt/er-dashboard/logs/access.log"
-JOB_LOG_FILE = "/opt/er-dashboard/logs/jobs.log"
-TRIGGER_SCRIPT = "/opt/er-dashboard/trigger.py"
-ER_JOB_TIMEOUT_SECONDS = 1800
+DASH_DIR = os.environ.get("ER_DASHBOARD_DIR", "/opt/er-dashboards")
+PORT = int(os.environ.get("ER_PORT", "8080"))
+HOST = os.environ.get("ER_HOST", "0.0.0.0")
+LOG_FILE = os.environ.get("ER_LOG_FILE", "/opt/er-dashboard/logs/access.log")
+JOB_LOG_FILE = os.environ.get("ER_JOB_LOG_FILE", "/opt/er-dashboard/logs/jobs.log")
+TRIGGER_SCRIPT = os.environ.get("ER_TRIGGER_SCRIPT", "/opt/er-dashboard/trigger.py")
+TRIGGER_CWD = os.environ.get("ER_TRIGGER_CWD", "/opt/er-dashboard")
+ER_JOB_TIMEOUT_SECONDS = int(os.environ.get("ER_JOB_TIMEOUT_SECONDS", "1800"))
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 ER_JOB_LOCK = threading.Lock()
 
-# DSA webUI URL (for the "back to DSA" link in ER service)
-DSA_URL = "http://147.139.145.89:8088/"
+# DSA webUI URL (for the "back to DSA" link in ER service). Local OrbStack
+# default points at the bundled dsa-local container; production must keep the
+# historical IP because nothing else changes here.
+DSA_URL = os.environ.get("ER_DSA_URL", "http://147.139.145.89:8088/")
 
 # Ticker metadata (ticker -> (name, desc, tag, summary))
 TICKER_META = {
@@ -138,7 +141,7 @@ def run_er_job(job_id):
         try:
             process = subprocess.Popen(
                 [sys.executable, TRIGGER_SCRIPT, ticker, "--force"],
-                cwd="/opt/er-dashboard",
+                cwd=TRIGGER_CWD,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,

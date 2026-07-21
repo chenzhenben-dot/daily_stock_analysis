@@ -4,6 +4,7 @@
 *.env
 *.env.local
 .env.*.local
+.env.orbstack.local
 
 # 测试文件（可能包含敏感配置）
 # 仅忽略仓库根目录下的临时 test_*.py 脚本；tests/ 目录下的单元测试需要纳入版本控制。
@@ -99,3 +100,9 @@ docs/specs/
 /searxng-data/
 /watch_telegram_bot.sh
 /docker/*.codex-*
+
+# OrbStack local staging environment (pre-release, never shared with prod)
+# All data, logs, reports and job metadata live here; production data is
+# untouched and never copied in.
+.orbstack/
+/.orbstack/
