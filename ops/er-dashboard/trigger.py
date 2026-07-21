@@ -566,6 +566,24 @@ FULL_RESEARCH_FIELD_GROUPS = [
 ]
 
 
+def split_field_batches(fields, max_weight=12):
+    """Split ER fields by expected output size, not only field count."""
+    batches = []
+    current = []
+    current_weight = 0
+    for field in fields:
+        weight = 5 if field in ROW_FIELDS else 2 if field in LIST_FIELDS else 1
+        if current and current_weight + weight > max_weight:
+            batches.append(current)
+            current = []
+            current_weight = 0
+        current.append(field)
+        current_weight += weight
+    if current:
+        batches.append(current)
+    return batches
+
+
 # === SKILL.md 100% Compliance Constants ===
 
 REQUIRED_FIELDS = {
@@ -1294,7 +1312,7 @@ def call_llm(ticker, stock_data, env):
         except Exception as parse_err:
             return None, "JSON parse failed: " + str(parse_err)[:160], content
 
-    def request_json(prompt, max_tokens, timeout=180):
+    def request_json(prompt, max_tokens, timeout=180, reasoning_split=True):
         payload = {
             "model": model,
             "messages": [
@@ -1303,7 +1321,7 @@ def call_llm(ticker, stock_data, env):
             ],
             "temperature": 0.1,
             "max_tokens": max_tokens,
-            "reasoning_split": True,
+            "reasoning_split": reasoning_split,
         }
         req = urllib.request.Request(base_url + "/chat/completions", data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key})
         raw = urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8")
@@ -1321,7 +1339,7 @@ def call_llm(ticker, stock_data, env):
     total_stages = len(FULL_RESEARCH_FIELD_GROUPS)
     for stage_index, (stage_name, fields) in enumerate(FULL_RESEARCH_FIELD_GROUPS, 1):
         print("ER_STAGE {}/{} {}".format(stage_index, total_stages, stage_name), flush=True)
-        chunks = [fields[index:index + 12] for index in range(0, len(fields), 12)]
+        chunks = split_field_batches(fields)
         for chunk_index, chunk in enumerate(chunks, 1):
             print("ER_BATCH {}/{} {} {}/{}".format(stage_index, total_stages, stage_name, chunk_index, len(chunks)), flush=True)
             prompt_data = trim_stock_data_for_prompt(stock_data, per_source_limit=900, max_sources=24)
@@ -1336,6 +1354,19 @@ def call_llm(ticker, stock_data, env):
                     stage_name="{} ({}/{})".format(stage_name, chunk_index, len(chunks)),
                 )
                 obj, err, raw_content = request_json(prompt, max_tokens=9000, timeout=300)
+                if err and "finish_reason=length" in err:
+                    print(
+                        "ER_RETRY {}/{} {} {}/{} no-reasoning".format(
+                            stage_index, total_stages, stage_name,
+                            chunk_index, len(chunks)),
+                        flush=True,
+                    )
+                    obj, err, raw_content = request_json(
+                        prompt,
+                        max_tokens=9000,
+                        timeout=300,
+                        reasoning_split=False,
+                    )
                 if err:
                     Path("/tmp/er-llm-last.txt").write_text(raw_content[:20000], encoding="utf-8")
                     return None, "{} batch {}/{} JSON failed: {}".format(stage_name, chunk_index, len(chunks), err)

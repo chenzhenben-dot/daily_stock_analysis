@@ -9,6 +9,7 @@ import importlib.util
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 TRIGGER_PATH = Path(__file__).resolve().with_name("trigger.py")
@@ -457,6 +458,87 @@ class TriggerStabilityTests(unittest.TestCase):
         # Each product line survives.
         self.assertIn("Consumer Storage", rows)
         self.assertIn("Enterprise Storage", rows)
+
+    def test_field_batches_limit_row_heavy_output(self):
+        """A batch count is not an output-size estimate: table fields are
+        substantially heavier than scalar fields and must be split apart."""
+        self.assertTrue(
+            hasattr(TRIGGER, "split_field_batches"),
+            "trigger must expose weighted ER field batching",
+        )
+        financial_fields = TRIGGER.FULL_RESEARCH_FIELD_GROUPS[1][1]
+        batches = TRIGGER.split_field_batches(financial_fields)
+        self.assertGreater(len(batches), 2)
+        for batch in batches:
+            row_count = sum(field in TRIGGER.ROW_FIELDS for field in batch)
+            self.assertLessEqual(row_count, 2, batch)
+
+    def test_length_exhaustion_retries_without_reasoning_split(self):
+        """MiniMax can spend the whole output budget on reasoning and return
+        finish_reason=length with empty content. That response is retryable,
+        not a fatal end to the complete ER job."""
+        requests = []
+
+        class FakeResponse(object):
+            def __init__(self, payload):
+                self.payload = payload
+
+            def read(self):
+                return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+
+        def fake_urlopen(req, timeout=None):
+            payload = json.loads(req.data.decode("utf-8"))
+            requests.append(payload)
+            if len(requests) == 1:
+                return FakeResponse({
+                    "choices": [{
+                        "finish_reason": "length",
+                        "message": {"content": "", "reasoning": "analysis only"},
+                    }],
+                })
+            prompt = payload["messages"][1]["content"]
+            marker = "覆盖以下模板字段:\n"
+            fields = json.loads(prompt.split(marker, 1)[1].split("\n", 1)[0])
+            values = {}
+            for field in fields:
+                if field in TRIGGER.ROW_SCHEMAS:
+                    cells = ["ok"] * len(TRIGGER.ROW_SCHEMAS[field])
+                    values[field] = "<tr>{}</tr>".format(
+                        "".join("<td>{}</td>".format(cell) for cell in cells))
+                elif field in TRIGGER.LIST_FIELDS:
+                    values[field] = ["ok"]
+                elif field in TRIGGER.CLASS_FIELDS:
+                    values[field] = "warn"
+                else:
+                    values[field] = "ok"
+            return FakeResponse({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": json.dumps(
+                            {"dashboard_data": values}, ensure_ascii=False),
+                    },
+                }],
+            })
+
+        skill_dir = TRIGGER_PATH.parent / "equity-research"
+        with mock.patch.object(TRIGGER, "SKILL_PATH", skill_dir / "SKILL.md"), \
+                mock.patch.object(
+                    TRIGGER,
+                    "TEMPLATE_PATH",
+                    skill_dir / "references" / "dashboard-template.html",
+                ), mock.patch.object(TRIGGER.urllib.request, "urlopen", fake_urlopen):
+            result, error = TRIGGER.call_llm(
+                "SNDK",
+                {"ticker": "SNDK", "research_sources": []},
+                {"LLM_MINIMAX_API_KEY": "test-key"},
+            )
+
+        self.assertIsNone(error)
+        self.assertIsInstance(result, dict)
+        self.assertGreater(len(requests), 1)
+        self.assertTrue(requests[0]["reasoning_split"])
+        self.assertFalse(requests[1]["reasoning_split"])
 
 
 def _build_multi_segment_companyfacts():
