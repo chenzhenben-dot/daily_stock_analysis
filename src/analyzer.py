@@ -2806,8 +2806,13 @@ class GeminiAnalyzer:
             return obj.get(key)
         return getattr(obj, key, None)
 
-    def _extract_text_blocks(self, blocks: Any) -> str:
-        """Extract text from OpenAI-compatible content block lists."""
+    def _extract_text_blocks(self, blocks: Any, *, strip: bool = True) -> str:
+        """Extract final-answer text from OpenAI-compatible content blocks.
+
+        Some reasoning models expose thinking and final-answer blocks in the
+        same list. Thinking blocks can also carry a ``text`` field, so only
+        explicitly final text block types should be included.
+        """
         if not blocks:
             return ""
 
@@ -2817,20 +2822,26 @@ class GeminiAnalyzer:
                 parts.append(block)
                 continue
 
+            block_type = ""
             text = None
             if isinstance(block, dict):
+                block_type = str(block.get("type") or "").strip().lower()
                 text = block.get("text")
                 if text is None:
                     text = block.get("content")
             else:
+                block_type = str(getattr(block, "type", "") or "").strip().lower()
                 text = getattr(block, "text", None)
                 if text is None:
                     text = getattr(block, "content", None)
 
+            if block_type and block_type not in {"text", "output_text"}:
+                continue
             if isinstance(text, str) and text:
                 parts.append(text)
 
-        return "".join(parts).strip()
+        result = "".join(parts)
+        return result.strip() if strip else result
 
     def _extract_completion_text(self, response: Any) -> str:
         """Extract text from non-stream LiteLLM completion responses."""
@@ -2885,15 +2896,7 @@ class GeminiAnalyzer:
                 content = getattr(message, "content", None)
 
         if isinstance(content, list):
-            parts: List[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    text = item.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-            return "".join(parts)
+            return self._extract_text_blocks(content, strip=False)
 
         return content if isinstance(content, str) else ""
 
