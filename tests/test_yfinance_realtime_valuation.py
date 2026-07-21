@@ -2,7 +2,7 @@
 """Regression tests for yfinance realtime valuation fields."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from data_provider.yfinance_fetcher import YfinanceFetcher
 
@@ -26,7 +26,8 @@ def test_us_realtime_quote_includes_pe_and_pb_from_ticker_info() -> None:
         },
     )
 
-    with patch("data_provider.yfinance_fetcher.yf.Ticker", return_value=ticker):
+    fake_yfinance = SimpleNamespace(Ticker=Mock(return_value=ticker))
+    with patch.dict("sys.modules", {"yfinance": fake_yfinance}):
         quote = YfinanceFetcher().get_realtime_quote("AAPL")
 
     assert quote is not None
