@@ -14,6 +14,13 @@ name: daily-stock-analysis-orbstack
 # 与生产 compose 共用同一份源码构建，但容器名、端口、数据目录、命令都不同。
 # ============================================================
 
+# 公共锚点：所有服务都 <<: *orbstack-common，确保以下字段在最终 compose config
+# 中确实展开到两个服务（通过 `docker compose config` 校验）：
+#   restart: "no"
+#   init: true
+#   logging 限制（json-file，max-size=10m，max-file=3）
+# 注：Compose 5.x 不会从 YAML 锚点合并 env_file 到服务定义，所以 env_file
+# 在每个服务里显式声明，与锚点保持一致。
 x-orbstack-common: &orbstack-common
   restart: "no"
   init: true
@@ -31,6 +38,7 @@ services:
   # DSA 本地预发布：源码构建原生 arm64 镜像（与生产 Dockerfile 共用）
   # ----------------------------------------------------------
   dsa-local:
+    <<: *orbstack-common
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -40,6 +48,9 @@ services:
       #   - linux/arm64
     image: dsa-local:orbstack
     container_name: dsa-local
+    # 显式声明 env_file（Compose 5.x 不从锚点合并 env_file）。
+    env_file:
+      - ../.env.orbstack.local
     # 完全跑在 Linux bridge 上，不使用 network_mode: host。
     # OpenD 在生产里走 host loopback + SSH 反向隧道；本机由 Mac 原生 OpenD 提供，
     # 预发布阶段不连接 OpenD（启动时 --no-notify，且本 compose 不暴露 quote 端口）。
@@ -67,13 +78,12 @@ services:
       - --port
       - "8088"
       - --no-notify
+    # 严格只接受 /api/health 的 2xx 响应；连接失败或 4xx/5xx 必须非零退出。
+    # 严禁 || exit 0 等掩盖故障的写法。
     healthcheck:
       test:
         - CMD-SHELL
-        - >-
-          curl -fsS http://127.0.0.1:8088/api/health
-          || curl -fsS http://127.0.0.1:8088/health
-          || exit 0
+        - curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/api/health | grep -Eq '^2[0-9]{2}$$'
       interval: 30s
       timeout: 10s
       start_period: 30s
@@ -86,28 +96,29 @@ services:
           memory: 512M
 
   # ----------------------------------------------------------
-  # ER Dashboard 本地预发布
+  # ER Dashboard 本地预发布（完整不可变镜像）
   # ----------------------------------------------------------
   er-local:
+    <<: *orbstack-common
     build:
       context: ..
       dockerfile: ops/er-dashboard/Dockerfile
     image: er-dashboard-local:orbstack
     container_name: er-dashboard-local
+    # 显式声明 env_file（Compose 5.x 不从锚点合并 env_file）。
+    env_file:
+      - ../.env.orbstack.local
     ports:
       - "127.0.0.1:18080:8080"
     volumes:
-      # 看板输出、job 元数据、access log 全部落到本地 .orbstack/er/。
+      # 只挂运行时数据：dashboard 输出、job 元数据、access log、本地配置文件。
+      # 不再挂载任何宿主源码，源码全部 COPY 进镜像（完整不可变）。
       - ../.orbstack/er/dashboards:/opt/er-dashboards
       - ../.orbstack/er/logs:/opt/er-dashboard/logs
       - ../.orbstack/er/jobs:/opt/er-dashboard/jobs
-      # 源码以 read-only 挂入，trigger.py / SKILL.md 的本地修改立即生效，无需重建镜像。
-      - ../ops/er-dashboard/app.py:/opt/er-dashboard/app.py:ro
-      - ../ops/er-dashboard/trigger.py:/opt/er-dashboard/trigger.py:ro
-      - ../ops/er-dashboard/equity-research:/opt/er-dashboard/equity-research:ro
-      - ../ops/er-dashboard/test_stability.py:/opt/er-dashboard/test_stability.py:ro
-      - ../ops/er-dashboard/test_trigger_stability.py:/opt/er-dashboard/test_trigger_stability.py:ro
-      - ../ops/er-dashboard/test_app_config.py:/opt/er-dashboard/test_app_config.py:ro
+      # 本地 ER 配置文件路径由 trigger.py 的 ER_ENV_PATH 控制（默认 /opt/dsa/.env），
+      # 这里挂到 /opt/er-dashboard/.env.local，只读，避免覆盖生产默认值。
+      - ../.env.orbstack.local:/opt/er-dashboard/.env.local:ro
     environment:
       - TZ=Asia/Shanghai
       - ER_HOST=0.0.0.0
@@ -118,10 +129,14 @@ services:
       - ER_TRIGGER_SCRIPT=/opt/er-dashboard/trigger.py
       - ER_TRIGGER_CWD=/opt/er-dashboard
       - ER_DSA_URL=http://127.0.0.1:18088/
+      # 本地覆盖 trigger.py 的 DSA_ENV_PATH；默认仍是 /opt/dsa/.env，
+      # 生产行为完全不变。
+      - ER_ENV_PATH=/opt/er-dashboard/.env.local
+    # 严格 2xx 才算健康，失败必须非零退出，不允许任何兜底。
     healthcheck:
       test:
         - CMD-SHELL
-        - python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3).status == 200 else 1)"
+        - curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ | grep -Eq '^2[0-9]{2}$$'
       interval: 30s
       timeout: 5s
       start_period: 10s

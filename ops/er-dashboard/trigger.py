@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-DSA_ENV_PATH = "/opt/dsa/.env"
+DSA_ENV_PATH = os.environ.get("ER_ENV_PATH", "/opt/dsa/.env")
 
 # === SEC XBRL deterministic extractor (pure functions, no LLM) ===
 #
@@ -481,9 +481,9 @@ def extract_sec_financial_metrics(companyfacts):
         })
     out["balance_sheet"] = bs_rows
     return out
-DASH_DIR = "/opt/er-dashboards"
+DASH_DIR = os.environ.get("ER_DASHBOARD_DIR", "/opt/er-dashboards")
 LOCAL_SKILL_DIR = Path.home() / ".claude/skills/equity-research"
-SERVER_SKILL_DIR = Path("/opt/er-dashboard/equity-research")
+SERVER_SKILL_DIR = Path(os.environ.get("ER_SKILL_DIR", "/opt/er-dashboard/equity-research"))
 SKILL_DIR = SERVER_SKILL_DIR if (SERVER_SKILL_DIR / "SKILL.md").exists() else LOCAL_SKILL_DIR
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 TEMPLATE_PATH = SKILL_DIR / "references/dashboard-template.html"
