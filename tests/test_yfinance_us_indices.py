@@ -33,6 +33,33 @@ def _make_mock_hist(close: float, prev_close: float, high: float = None, low: fl
     }, index=pd.DatetimeIndex(['2025-02-16', '2025-02-17']))
 
 
+def _make_mock_yf_with_per_symbol_history(history_map):
+    """构造 mock yf，按 symbol 路由 history 返回值。
+
+    ``history_map`` 是 ``{ yf_symbol: history_dataframe_or_exception_or_callable }``。
+    如果值是 ``pd.DataFrame``（含空 DataFrame）则直接返回；如果是 ``Exception`` 则抛；
+    如果是 ``callable``，按 ``history(period='2d')`` 调它。
+    """
+    def make_ticker(symbol):
+        ticker = MagicMock()
+        ticker._ticker_symbol = symbol
+        value = history_map.get(symbol)
+
+        def history_side_effect(*args, **kwargs):
+            if isinstance(value, Exception):
+                raise value
+            if callable(value):
+                return value(*args, **kwargs)
+            return value
+
+        ticker.history.side_effect = history_side_effect
+        return ticker
+
+    mock_yf = MagicMock()
+    mock_yf.Ticker.side_effect = make_ticker
+    return mock_yf
+
+
 def _make_mock_yf(hist_df: pd.DataFrame):
     """构造模拟的 yf 模块，Ticker().history() 返回给定 DataFrame"""
     mock_ticker = MagicMock()
@@ -168,7 +195,7 @@ class TestGetUsMainIndices(unittest.TestCase):
 
     @patch('data_provider.yfinance_fetcher.get_us_index_yf_symbol')
     def test_handles_ticker_exception(self, mock_get_symbol):
-        """Ticker.history 抛异常时跳过该指数，不整体失败"""
+        """所有 ticker 抛异常时，NDX100 仍写入占位行（其它主指数失败时整批丢弃）。"""
         mock_get_symbol.return_value = ('^GSPC', '标普500指数')
         mock_ticker = MagicMock()
         mock_ticker.history.side_effect = Exception("Network error")
@@ -177,7 +204,12 @@ class TestGetUsMainIndices(unittest.TestCase):
 
         result = self.fetcher._get_us_main_indices(mock_yf)
 
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        # NDX100 通过双重失败占位保留；其它指数（SPX/IXIC/DJI/VIX）数据全部失败时不写入。
+        codes = [item['code'] for item in result]
+        self.assertIn('NDX100', codes)
+        ndx_row = next(item for item in result if item['code'] == 'NDX100')
+        self.assertTrue(ndx_row.get('data_unavailable'))
 
     @patch('data_provider.yfinance_fetcher.get_us_index_yf_symbol')
     def test_skips_unknown_index_code(self, mock_get_symbol):
@@ -196,6 +228,109 @@ class TestGetUsMainIndices(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]['code'], 'SPX')
+
+    @patch('data_provider.yfinance_fetcher.get_us_index_yf_symbol')
+    def test_ndx100_falls_back_to_qqq_when_ndx_history_empty(self, mock_get_symbol):
+        """^NDX 空 history → 回落到 QQQ；QQQ 行带 proxy/source 标记。"""
+        def get_symbol(code):
+            mapping = {
+                'SPX': ('^GSPC', '标普500指数'),
+                'IXIC': ('^IXIC', '纳斯达克综合指数'),
+                'NDX100': ('^NDX', '纳斯达克100指数'),
+                'DJI': ('^DJI', '道琼斯工业指数'),
+                'VIX': ('^VIX', 'VIX恐慌指数'),
+            }
+            return mapping.get(code, (None, None))
+
+        mock_get_symbol.side_effect = get_symbol
+
+        primary_hist = _make_mock_hist(close=21000.0, prev_close=20500.0)
+        proxy_hist = _make_mock_hist(close=500.0, prev_close=495.0)
+        mock_yf = _make_mock_yf_with_per_symbol_history({
+            '^GSPC': primary_hist,
+            '^IXIC': primary_hist,
+            '^NDX': pd.DataFrame(),
+            'QQQ': proxy_hist,
+            '^DJI': primary_hist,
+            '^VIX': primary_hist,
+        })
+
+        result = self.fetcher._get_us_main_indices(mock_yf)
+
+        codes = [item['code'] for item in result]
+        self.assertIn('NDX100', codes)
+        ndx_row = next(item for item in result if item['code'] == 'NDX100')
+        self.assertTrue(ndx_row.get('proxy'))
+        self.assertEqual(ndx_row.get('source'), 'nasdaq100_qqq_etf_proxy')
+        self.assertIn('QQQ ETF', ndx_row['name'])
+
+    @patch('data_provider.yfinance_fetcher.get_us_index_yf_symbol')
+    def test_ndx100_falls_back_to_qqq_when_ndx_ticker_throws(self, mock_get_symbol):
+        """^NDX 抛异常 → 回落到 QQQ。"""
+        def get_symbol(code):
+            mapping = {
+                'SPX': ('^GSPC', '标普500指数'),
+                'IXIC': ('^IXIC', '纳斯达克综合指数'),
+                'NDX100': ('^NDX', '纳斯达克100指数'),
+                'DJI': ('^DJI', '道琼斯工业指数'),
+                'VIX': ('^VIX', 'VIX恐慌指数'),
+            }
+            return mapping.get(code, (None, None))
+
+        mock_get_symbol.side_effect = get_symbol
+
+        primary_hist = _make_mock_hist(close=5100.0, prev_close=5000.0)
+        proxy_hist = _make_mock_hist(close=500.0, prev_close=495.0)
+        mock_yf = _make_mock_yf_with_per_symbol_history({
+            '^GSPC': primary_hist,
+            '^IXIC': primary_hist,
+            '^NDX': RuntimeError("yfinance network error"),
+            'QQQ': proxy_hist,
+            '^DJI': primary_hist,
+            '^VIX': primary_hist,
+        })
+
+        result = self.fetcher._get_us_main_indices(mock_yf)
+
+        codes = [item['code'] for item in result]
+        self.assertIn('NDX100', codes)
+        ndx_row = next(item for item in result if item['code'] == 'NDX100')
+        self.assertTrue(ndx_row.get('proxy'))
+        self.assertEqual(ndx_row.get('source'), 'nasdaq100_qqq_etf_proxy')
+
+    @patch('data_provider.yfinance_fetcher.get_us_index_yf_symbol')
+    def test_ndx100_keeps_unavailable_placeholder_when_both_fail(self, mock_get_symbol):
+        """^NDX 与 QQQ 都失败 → NDX100 行保留，data_unavailable=True。"""
+        def get_symbol(code):
+            mapping = {
+                'SPX': ('^GSPC', '标普500指数'),
+                'IXIC': ('^IXIC', '纳斯达克综合指数'),
+                'NDX100': ('^NDX', '纳斯达克100指数'),
+                'DJI': ('^DJI', '道琼斯工业指数'),
+                'VIX': ('^VIX', 'VIX恐慌指数'),
+            }
+            return mapping.get(code, (None, None))
+
+        mock_get_symbol.side_effect = get_symbol
+
+        primary_hist = _make_mock_hist(close=5100.0, prev_close=5000.0)
+        mock_yf = _make_mock_yf_with_per_symbol_history({
+            '^GSPC': primary_hist,
+            '^IXIC': primary_hist,
+            '^NDX': pd.DataFrame(),
+            'QQQ': pd.DataFrame(),
+            '^DJI': primary_hist,
+            '^VIX': primary_hist,
+        })
+
+        result = self.fetcher._get_us_main_indices(mock_yf)
+
+        codes = [item['code'] for item in result]
+        self.assertIn('NDX100', codes)
+        ndx_row = next(item for item in result if item['code'] == 'NDX100')
+        self.assertTrue(ndx_row.get('data_unavailable'))
+        self.assertEqual(ndx_row.get('source'), 'unavailable')
+        self.assertEqual(ndx_row['current'], 0.0)
 
 
 if __name__ == '__main__':

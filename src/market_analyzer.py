@@ -69,9 +69,12 @@ class MarketIndex:
     volume: float = 0.0          # 成交量（手）
     amount: float = 0.0          # 成交额（元）
     amplitude: float = 0.0       # 振幅(%)
-    
+    proxy: bool = False          # 当前点位来自代理数据源（如 NDX100 回落至 QQQ ETF）
+    data_unavailable: bool = False  # 主备数据源均失败，UI 显示"数据暂不可用"
+    source: Optional[str] = None  # 数据来源标识（如 nasdaq100_qqq_etf_proxy / yfinance / unavailable）
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             'code': self.code,
             'name': self.name,
             'current': self.current,
@@ -84,6 +87,13 @@ class MarketIndex:
             'amount': self.amount,
             'amplitude': self.amplitude,
         }
+        if self.proxy:
+            payload['proxy'] = True
+        if self.data_unavailable:
+            payload['data_unavailable'] = True
+        if self.source:
+            payload['source'] = self.source
+        return payload
 
 
 @dataclass
@@ -522,7 +532,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                         prev_close=item['prev_close'],
                         volume=item['volume'],
                         amount=item['amount'],
-                        amplitude=item['amplitude']
+                        amplitude=item['amplitude'],
+                        proxy=bool(item.get('proxy', False)),
+                        data_unavailable=bool(item.get('data_unavailable', False)),
+                        source=item.get('source'),
                     )
                     indices.append(index)
 
@@ -1044,7 +1057,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             )
             if self._supports_limit_up_down_stats():
                 breadth_line += f"Limit-up {overview.limit_up_count} / Limit-down {overview.limit_down_count}; "
-            breadth_line += f"Turnover {overview.total_amount:.0f} ({self._get_turnover_unit_label()})"
+            breadth_line += (
+                f"Turnover {self._format_turnover_value(overview.total_amount)} "
+                f"({self._get_turnover_unit_label()})"
+            )
             return "\n".join(
                 [
                     f"- **Market Signal**: {light['score']}/100 "
@@ -1596,7 +1612,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 ]
                 if self._supports_limit_up_down_stats():
                     stats_lines.append(f"- Limit-up: {overview.limit_up_count} | Limit-down: {overview.limit_down_count}")
-                stats_lines.append(f"- Turnover: {overview.total_amount:.0f} ({self._get_turnover_unit_label()})")
+                stats_lines.append(
+                    f"- Turnover: {self._format_turnover_value(overview.total_amount)} "
+                    f"({self._get_turnover_unit_label()})"
+                )
                 stats_block = "\n".join(stats_lines)
 
             if self.profile.has_sector_rankings:
@@ -1866,7 +1885,10 @@ Output the report content directly, no extra commentary.
                             f"| Limit-down | {overview.limit_down_count} |",
                         ]
                     )
-                stats_rows.append(f"| Turnover ({self._get_turnover_unit_label()}) | {overview.total_amount:.0f} |")
+                stats_rows.append(
+                    f"| Turnover ({self._get_turnover_unit_label()}) | "
+                    f"{self._format_turnover_value(overview.total_amount)} |"
+                )
                 stats_section = f"""
 ### 3. Breadth & Liquidity
 | Metric | Value |

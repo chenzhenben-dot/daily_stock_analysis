@@ -67,7 +67,7 @@ def _us_overview(*, amount: float = 189_727_840_037.0) -> MarketOverview:
         date="2026-07-22",
         indices=[
             MarketIndex(code="SPX", name="标普500指数", current=6200.0, change_pct=0.5),
-            MarketIndex(code="NDX", name="纳斯达克综合指数", current=20500.0, change_pct=0.7),
+            MarketIndex(code="IXIC", name="纳斯达克综合指数", current=20500.0, change_pct=0.7),
             MarketIndex(code="NDX100", name="纳斯达克100指数", current=21500.0, change_pct=0.8),
             MarketIndex(code="DJI", name="道琼斯工业指数", current=39800.0, change_pct=0.2),
             MarketIndex(code="VIX", name="VIX恐慌指数", current=13.4, change_pct=-2.1),
@@ -215,6 +215,74 @@ class TestUsDescribeTurnover(unittest.TestCase):
             self.assertNotIn("中等活跃", text, msg=region)
 
 
+class TestUsEnglishFallbackTurnover(unittest.TestCase):
+    """验收 #4: 英文 fallback 不得直接渲染 overview.total_amount 原始数字，
+    必须走 region-aware formatter；189_727_840_037 USD 必须显示约 189.73 USD bn。"""
+
+    def _make_us_en_analyzer(self) -> MarketAnalyzer:
+        analyzer = MarketAnalyzer.__new__(MarketAnalyzer)
+        analyzer.region = "us"
+        analyzer.profile = get_profile("us")
+        analyzer.strategy = get_market_strategy_blueprint("us")
+        analyzer.config = SimpleNamespace(report_language="en")
+        analyzer._get_output_language = MagicMock(return_value="en")
+        analyzer._get_review_title = MagicMock(return_value="# Market Review")
+        analyzer._get_market_scope_name = MagicMock(return_value="US market")
+        analyzer._get_turnover_unit_label = MagicMock(return_value="USD bn")
+        analyzer._supports_market_light = MagicMock(return_value=True)
+        return analyzer
+
+    def test_us_stats_block_turnover_uses_region_formatter(self):
+        analyzer = self._make_us_en_analyzer()
+        overview = _us_overview(amount=189_727_840_037.0)
+
+        stats = analyzer._build_stats_block(overview)
+
+        # 189_727_840_037 USD 应渲染为 189.73 USD bn（连续无空格的 189727840037 不该出现）
+        self.assertIn("189.73", stats)
+        self.assertIn("USD bn", stats)
+        self.assertNotIn("189727840037", stats)
+
+    def test_us_prompt_stats_block_uses_region_formatter(self):
+        analyzer = self._make_us_en_analyzer()
+        overview = _us_overview(amount=189_727_840_037.0)
+
+        prompt = analyzer._build_review_prompt(overview, [])
+
+        self.assertIn("189.73", prompt)
+        self.assertIn("USD bn", prompt)
+        self.assertNotIn("189727840037", prompt)
+
+    def test_cn_en_fallback_keeps_yi(self):
+        """CN 走 1e8 缩放；英文 stats block 也保留亿元单位。"""
+        analyzer = MarketAnalyzer.__new__(MarketAnalyzer)
+        analyzer.region = "cn"
+        analyzer.profile = get_profile("cn")
+        analyzer.strategy = get_market_strategy_blueprint("cn")
+        analyzer.config = SimpleNamespace(report_language="en")
+        analyzer._get_output_language = MagicMock(return_value="en")
+        analyzer._get_review_title = MagicMock(return_value="# Market Review")
+        analyzer._get_market_scope_name = MagicMock(return_value="A-share market")
+        analyzer._get_turnover_unit_label = MagicMock(return_value="CNY 100m")
+        analyzer._supports_market_light = MagicMock(return_value=True)
+        overview = MarketOverview(
+            date="2026-07-22",
+            indices=[MarketIndex(code="000001", name="SSE", current=3200.0, change_pct=0.5)],
+            up_count=3500,
+            down_count=1500,
+            flat_count=200,
+            limit_up_count=80,
+            limit_down_count=5,
+            total_amount=9.8e11,
+        )
+
+        stats = analyzer._build_stats_block(overview)
+
+        self.assertIn("9800", stats)
+        self.assertIn("CNY 100m", stats)
+        self.assertNotIn("980000000000", stats)
+
+
 class TestUsMarketReviewSourceTransparency(unittest.TestCase):
     """需求 #4: market_stats_source / sample_size 透传到 payload。"""
 
@@ -275,7 +343,7 @@ class TestUsMarketIndicesCoverage(unittest.TestCase):
 
         codes = [idx.code for idx in overview.indices]
 
-        for required in ("SPX", "NDX", "NDX100", "DJI", "VIX"):
+        for required in ("SPX", "IXIC", "NDX100", "DJI", "VIX"):
             self.assertIn(required, codes, msg=f"missing {required}")
 
     def test_us_payload_indices_contain_ndx100(self):
@@ -291,6 +359,22 @@ class TestUsMarketIndicesCoverage(unittest.TestCase):
 
         codes = [idx["code"] for idx in payload["indices"]]
         self.assertIn("NDX100", codes)
+
+    def test_ndx_alias_is_nasdaq100_not_nasdaq_composite(self):
+        """NDX 永远绑定纳斯达克100；IXIC 才是纳斯达克综合指数。"""
+        from data_provider.us_index_mapping import get_us_index_yf_symbol
+
+        ndx_yf, ndx_name = get_us_index_yf_symbol("NDX")
+        self.assertEqual(ndx_yf, "^NDX")
+        self.assertEqual(ndx_name, "纳斯达克100指数")
+
+        ixic_yf, ixic_name = get_us_index_yf_symbol("IXIC")
+        self.assertEqual(ixic_yf, "^IXIC")
+        self.assertEqual(ixic_name, "纳斯达克综合指数")
+
+        ndx100_yf, ndx100_name = get_us_index_yf_symbol("NDX100")
+        self.assertEqual(ndx100_yf, "^NDX")
+        self.assertEqual(ndx100_name, "纳斯达克100指数")
 
 
 class TestUsBlueprintAndPrompt(unittest.TestCase):

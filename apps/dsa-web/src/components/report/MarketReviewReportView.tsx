@@ -282,6 +282,84 @@ const formatMarketHighLow = (high: unknown, low: unknown): string => {
   return highText === '-' && lowText === '-' ? '-' : `${highText} / ${lowText}`;
 };
 
+type MarketReviewTextBundle = (typeof MARKET_REVIEW_TEXT)[ReportLanguage];
+
+/**
+ * 用户可读的 source label 映射。
+ * 原始 source id（payload.market_stats_source）保留在 payload 中，但主界面文字
+ * 应展示为这些人类可读的名字，避免用户看到 `moomoo_us_exchange_universe` 这种
+ * 内部实现细节。
+ */
+const MARKET_STATS_SOURCE_LABELS: Record<string, { zh: string; en: string; ko: string }> = {
+  moomoo_us_exchange_universe: { zh: 'Moomoo', en: 'Moomoo', ko: 'Moomoo' },
+  moomoo_large_cap_sample: { zh: 'Moomoo', en: 'Moomoo', ko: 'Moomoo' },
+  tickflow: { zh: 'TickFlow', en: 'TickFlow', ko: 'TickFlow' },
+  akshare: { zh: 'AkShare', en: 'AkShare', ko: 'AkShare' },
+  tushare: { zh: 'Tushare', en: 'Tushare', ko: 'Tushare' },
+  efinance: { zh: 'eFinance', en: 'eFinance', ko: 'eFinance' },
+  yfinance: { zh: 'Yahoo Finance', en: 'Yahoo Finance', ko: 'Yahoo Finance' },
+};
+
+const formatSourceLabel = (rawSource: string | undefined, reportLanguage: ReportLanguage): string => {
+  if (!rawSource) {
+    return reportLanguage === 'en' ? 'Unknown' : reportLanguage === 'ko' ? '미표기' : '未标注';
+  }
+  const mapped = MARKET_STATS_SOURCE_LABELS[rawSource];
+  if (mapped) {
+    return mapped[reportLanguage];
+  }
+  // 未识别的 source id 不直接渲染到主界面，避免泄露内部实现
+  return reportLanguage === 'en' ? 'Unknown' : reportLanguage === 'ko' ? '기타' : '未标注';
+};
+
+const REGION_ROTATION_OVERRIDES: Record<
+  ReportLanguage,
+  { rotationAndFunds: string; noRotationView: string }
+> = {
+  zh: {
+    rotationAndFunds: '轮动与资金',
+    noRotationView: '暂无轮动与资金观点',
+  },
+  en: {
+    rotationAndFunds: 'Rotation & Funds',
+    noRotationView: 'No rotation/funds view yet',
+  },
+  ko: {
+    rotationAndFunds: '순환과 자금',
+    noRotationView: '순환/자금 관점 없음',
+  },
+};
+
+const isCnRegion = (region: string | undefined): boolean => {
+  if (!region) return false;
+  return region
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .some((part) => part === 'cn' || part === 'a' || part === 'a-share' || part.startsWith('cn-'));
+};
+
+/**
+ * 按 payload.region 决定 rotationAndFunds / noRotationView 文案。
+ * - cn：保留"轮动与资金 / Rotation & Funds"（CN 拥有真实资金流数据）。
+ * - us / hk / jp / kr：默认已是"市场宽度与流动性 / Breadth & Liquidity"，
+ *   因为这些市场没有 ETF 资金流 / 交易所净流入 / 机构资金数据，
+ *   渲染"资金流"会引导 LLM / 用户误解为有真实资金流统计。
+ * - 其他 / 缺省：fallback 到语言对应的默认文案（= 宽度与流动性）。
+ */
+const resolveRotationLabels = (
+  base: MarketReviewTextBundle,
+  region: string | undefined,
+  reportLanguage: ReportLanguage,
+): Pick<MarketReviewTextBundle, 'rotationAndFunds' | 'noRotationView'> => {
+  if (isCnRegion(region)) {
+    return REGION_ROTATION_OVERRIDES[reportLanguage];
+  }
+  return {
+    rotationAndFunds: base.rotationAndFunds,
+    noRotationView: base.noRotationView,
+  };
+};
+
 const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
   reviewSummary: string;
   noReviewSummary: string;
@@ -439,6 +517,12 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
   const meta = report?.meta;
   const contextPayload = report?.details?.contextSnapshot?.marketReviewPayload;
   const marketReviewPayload = providedPayload ?? (isMarketReviewPayload(contextPayload) ? contextPayload : null);
+  // rotationAndFunds 文案按 payload.region 分流：
+  // cn 保留"轮动与资金"，其他市场默认显示"市场宽度与流动性"。
+  const rotationLabels = useMemo(
+    () => resolveRotationLabels(marketReviewText, marketReviewPayload?.region, normalizedReportLanguage),
+    [marketReviewText, marketReviewPayload?.region, normalizedReportLanguage],
+  );
   const loadedContent = loadedMarkdown && loadedMarkdown.recordId === recordId ? loadedMarkdown.content : '';
   const content = providedContent ?? marketReviewPayload?.markdownReport ?? loadedContent;
   const error = loadError && loadError.recordId === recordId ? loadError.message : null;
@@ -555,15 +639,15 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
     },
     {
       icon: Layers,
-      label: marketReviewText.rotationAndFunds,
-      value: summary?.operationAdvice || marketReviewText.noRotationView,
+      label: rotationLabels.rotationAndFunds,
+      value: summary?.operationAdvice || rotationLabels.noRotationView,
     },
     {
       icon: ShieldAlert,
       label: marketReviewText.riskAndWatch,
       value: summary?.trendPrediction || marketReviewText.noRiskWatch,
     },
-  ], [marketReviewText, summary, text.marketSentiment]);
+  ], [marketReviewText, rotationLabels, summary, text.marketSentiment]);
 
   return (
     <div className={`animate-fade-in space-y-4 pb-8 ${className}`}>
@@ -733,7 +817,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                     {activeMarketData.breadth.marketStatsSource || activeMarketData.breadth.marketStatsSampleSize ? (
                       <p className="text-xs text-secondary-text">
                         {marketReviewText.sourceNote
-                          .replace('{source}', activeMarketData.breadth.marketStatsSource ?? '未标注')
+                          .replace('{source}', formatSourceLabel(activeMarketData.breadth.marketStatsSource, normalizedReportLanguage))
                           .replace(
                             '{sample}',
                             activeMarketData.breadth.marketStatsSampleSize

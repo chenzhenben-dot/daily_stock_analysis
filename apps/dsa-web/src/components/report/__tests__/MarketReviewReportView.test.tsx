@@ -382,9 +382,89 @@ describe('MarketReviewReportView', () => {
 
     expect(screen.getByText('189.73 十亿美元')).toBeInTheDocument();
     expect(
-      screen.getByText('来源：moomoo_us_exchange_universe · 覆盖样本：2,000 只'),
+      screen.getByText('来源：Moomoo · 覆盖样本：2,000 只'),
     ).toBeInTheDocument();
     expect(screen.queryByText('涨停/跌停')).not.toBeInTheDocument();
+  });
+
+  it('renders unknown market_stats_source as 未标注 / Unknown (no raw id leak)', () => {
+    const payload: MarketReviewPayload = {
+      version: 1,
+      kind: 'market_review',
+      region: 'us',
+      language: 'en',
+      title: 'Market Review',
+      rootTitle: 'Market Review',
+      breadth: {
+        upCount: 100,
+        downCount: 80,
+        totalAmount: 1e11,
+        turnoverUnit: 'USD bn',
+        marketStatsSource: 'some_internal_secret_provider_xyz',
+        marketStatsSampleSize: 500,
+      },
+      indices: [],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    };
+
+    render(
+      <MarketReviewReportView
+        payload={payload}
+        content="# Market Review"
+        reportLanguage="en"
+      />,
+    );
+
+    expect(screen.getByText('Source: Unknown · Sample size: 500')).toBeInTheDocument();
+    expect(screen.queryByText(/some_internal_secret_provider_xyz/)).not.toBeInTheDocument();
+  });
+
+  it('renders TickFlow / Yahoo Finance / Tushare as human readable names', () => {
+    const cases = [
+      { source: 'tickflow', expected: 'TickFlow' },
+      { source: 'yfinance', expected: 'Yahoo Finance' },
+      { source: 'tushare', expected: 'Tushare' },
+    ];
+
+    for (const c of cases) {
+      const payload: MarketReviewPayload = {
+        version: 1,
+        kind: 'market_review',
+        region: 'cn',
+        language: 'zh',
+        title: 'A股大盘复盘',
+        rootTitle: 'A股大盘复盘',
+        breadth: {
+          upCount: 1,
+          downCount: 1,
+          totalAmount: 1e9,
+          turnoverUnit: '亿元',
+          marketStatsSource: c.source,
+          marketStatsSampleSize: 100,
+        },
+        indices: [],
+        sectors: { top: [], bottom: [] },
+        concepts: { top: [], bottom: [] },
+        news: [],
+        sections: [],
+        markdownReport: '',
+      };
+
+      const { unmount } = render(
+        <MarketReviewReportView
+          payload={payload}
+          content="# A股大盘复盘"
+          reportLanguage="zh"
+        />,
+      );
+
+      expect(screen.getByText(`来源：${c.expected} · 覆盖样本：100 只`)).toBeInTheDocument();
+      unmount();
+    }
   });
 
   it('uses Breadth & Liquidity label and Rotation & Funds is gone', () => {
@@ -438,7 +518,142 @@ describe('MarketReviewReportView', () => {
 
     expect(screen.getByText('Breadth & Liquidity')).toBeInTheDocument();
     expect(screen.queryByText('Rotation & Funds')).not.toBeInTheDocument();
-    expect(screen.getByText('Source: moomoo_us_exchange_universe · Sample size: 2,000')).toBeInTheDocument();
+    expect(screen.getByText('Source: Moomoo · Sample size: 2,000')).toBeInTheDocument();
+  });
+
+  it('uses Rotation & Funds label when payload.region is cn (zh)', () => {
+    const report: AnalysisReport = {
+      meta: {
+        queryId: 'market-review-q-cn',
+        stockCode: 'MARKET',
+        stockName: '大盘复盘',
+        reportType: 'market_review',
+        reportLanguage: 'zh',
+        createdAt: '2026-07-22T08:00:00Z',
+      },
+      summary: {
+        analysisSummary: '',
+        operationAdvice: '主线切换至科技板块',
+        trendPrediction: '',
+        sentimentScore: 55,
+      },
+    };
+    const payload: MarketReviewPayload = {
+      version: 1,
+      kind: 'market_review',
+      region: 'cn',
+      language: 'zh',
+      title: 'A股大盘复盘',
+      rootTitle: 'A股大盘复盘',
+      breadth: {
+        upCount: 3500,
+        downCount: 1500,
+        flatCount: 200,
+        limitUpCount: 80,
+        limitDownCount: 5,
+        totalAmount: 9.8e11,
+        turnoverUnit: '亿元',
+      },
+      indices: [],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    };
+
+    render(
+      <MarketReviewReportView
+        report={report}
+        payload={payload}
+        content="# A股大盘复盘"
+        reportLanguage="zh"
+      />,
+    );
+
+    expect(screen.getByText('轮动与资金')).toBeInTheDocument();
+    expect(screen.queryByText('市场宽度与流动性')).not.toBeInTheDocument();
+  });
+
+  it('uses Rotation & Funds label when payload.region is cn (en)', () => {
+    const report: AnalysisReport = {
+      meta: {
+        queryId: 'market-review-q-cn-en',
+        stockCode: 'MARKET',
+        stockName: 'Market Review',
+        reportType: 'market_review',
+        reportLanguage: 'en',
+        createdAt: '2026-07-22T08:00:00Z',
+      },
+      summary: {
+        analysisSummary: '',
+        operationAdvice: 'rotation into tech',
+        trendPrediction: '',
+        sentimentScore: 55,
+      },
+    };
+    const payload: MarketReviewPayload = {
+      version: 1,
+      kind: 'market_review',
+      region: 'cn',
+      language: 'en',
+      title: 'Market Review',
+      rootTitle: 'Market Review',
+      breadth: {
+        upCount: 100,
+        downCount: 80,
+        totalAmount: 1e12,
+        turnoverUnit: 'CNY 100m',
+      },
+      indices: [],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    };
+
+    render(
+      <MarketReviewReportView
+        report={report}
+        payload={payload}
+        content="# Market Review"
+        reportLanguage="en"
+      />,
+    );
+
+    expect(screen.getByText('Rotation & Funds')).toBeInTheDocument();
+    expect(screen.queryByText('Breadth & Liquidity')).not.toBeInTheDocument();
+  });
+
+  it('falls back to Breadth & Liquidity when payload.region is missing', () => {
+    const report: AnalysisReport = {
+      meta: {
+        queryId: 'market-review-q-fallback',
+        stockCode: 'MARKET',
+        stockName: 'Market Review',
+        reportType: 'market_review',
+        reportLanguage: 'en',
+        createdAt: '2026-07-22T08:00:00Z',
+      },
+      summary: {
+        analysisSummary: '',
+        operationAdvice: '...',
+        trendPrediction: '',
+        sentimentScore: undefined as unknown as number,
+      },
+    };
+
+    render(
+      <MarketReviewReportView
+        report={report}
+        content="# Market Review"
+        reportLanguage="en"
+      />,
+    );
+
+    expect(screen.getByText('Breadth & Liquidity')).toBeInTheDocument();
+    expect(screen.queryByText('Rotation & Funds')).not.toBeInTheDocument();
   });
 
   it('opens run flow for historical market review records', () => {

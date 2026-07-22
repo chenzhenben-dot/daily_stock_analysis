@@ -325,7 +325,7 @@ class YfinanceFetcher(BaseFetcher):
         ticker = yf.Ticker(yf_code)
         # 取近两日数据以计算涨跌幅
         hist = ticker.history(period='2d')
-        if hist.empty:
+        if hist is None or hist.empty:
             return None
         today_row = hist.iloc[-1]
         prev_row = hist.iloc[-2] if len(hist) > 1 else today_row
@@ -350,6 +350,29 @@ class YfinanceFetcher(BaseFetcher):
             'volume': float(today_row['Volume']),
             'amount': 0.0,  # Yahoo Finance 不提供准确成交额
             'amplitude': amplitude,
+        }
+
+    def _make_unavailable_index_entry(self, return_code: str, name: str) -> Dict[str, Any]:
+        """Build a placeholder MarketIndex row when both primary and fallback fail.
+
+        The row is kept (not dropped) so the index list still advertises that
+        ``return_code`` belongs to the market. UI surfaces "数据暂不可用".
+        """
+        return {
+            'code': return_code,
+            'name': name,
+            'current': 0.0,
+            'change': 0.0,
+            'change_pct': 0.0,
+            'open': 0.0,
+            'high': 0.0,
+            'low': 0.0,
+            'prev_close': 0.0,
+            'volume': 0.0,
+            'amount': 0.0,
+            'amplitude': 0.0,
+            'data_unavailable': True,
+            'source': 'unavailable',
         }
 
     def get_main_indices(self, region: str = "cn") -> Optional[List[Dict[str, Any]]]:
@@ -403,9 +426,15 @@ class YfinanceFetcher(BaseFetcher):
         return None
 
     def _get_us_main_indices(self, yf) -> Optional[List[Dict[str, Any]]]:
-        """获取美股主要指数行情（SPX、IXIC、NDX100、DJI、VIX），复用 _fetch_yf_ticker_data"""
+        """获取美股主要指数行情（SPX、IXIC、NDX100、DJI、VIX），复用 _fetch_yf_ticker_data。
+
+        NDX100 行为契约：
+        - 首选 ^NDX；任何失败（异常 / 空 history / None）都必须回落 QQQ（Invesco QQQ Trust，追踪 NDX100）。
+        - QQQ 成功时该行必须带 ``proxy=True``、``source='nasdaq100_qqq_etf_proxy'``，明确标记为代理数据，
+          不可伪装为真实 ^NDX 指数。
+        - QQQ 也失败时，NDX100 行保留为 ``data_unavailable=True`` 占位；绝不静默删除。
+        """
         # 大盘复盘所需核心美股指数：标普 500 + 纳斯达克综合 + 纳斯达克 100 + 道指 + VIX。
-        # NDX100 必须始终保留；当 ^NDX 临时失败时回落到 QQQ（Invesco QQQ Trust，追踪 NDX100）。
         us_indices = ['SPX', 'IXIC', 'NDX100', 'DJI', 'VIX']
         results = []
         try:
@@ -413,22 +442,42 @@ class YfinanceFetcher(BaseFetcher):
                 yf_symbol, name = get_us_index_yf_symbol(code)
                 if not yf_symbol:
                     continue
+                primary_failed = False
                 try:
                     item = self._fetch_yf_ticker_data(yf, yf_symbol, name, code)
+                    if item is None:
+                        primary_failed = True
+                        logger.warning(f"[Yfinance] 获取美股指数 {name}（{yf_symbol}）返回空 history，触发回退")
+                except Exception as e:
+                    primary_failed = True
+                    logger.warning(f"[Yfinance] 获取美股指数 {name}（{yf_symbol}）异常: {e}")
+
+                if not primary_failed:
                     if item:
                         results.append(item)
                         logger.debug(f"[Yfinance] 获取美股指数 {name} 成功")
-                except Exception as e:
-                    logger.warning(f"[Yfinance] 获取美股指数 {name} 失败: {e}")
-                    if code == 'NDX100':
-                        # 备用：QQQ 追踪 NDX100，避免 NDX100 因数据源临时失败而消失。
-                        try:
-                            fallback = self._fetch_yf_ticker_data(yf, 'QQQ', '纳斯达克100指数(QQQ ETF)', code)
-                            if fallback:
-                                results.append(fallback)
-                                logger.info("[Yfinance] NDX100 回落至 QQQ ETF 数据")
-                        except Exception as fb_exc:
-                            logger.warning(f"[Yfinance] NDX100 备用 QQQ 也失败: {fb_exc}")
+                    continue
+
+                if code == 'NDX100':
+                    # 备用：QQQ 追踪 NDX100，避免 NDX100 因数据源临时失败而消失。
+                    fallback_failed = False
+                    try:
+                        fallback = self._fetch_yf_ticker_data(yf, 'QQQ', '纳斯达克100指数(QQQ ETF)', code)
+                    except Exception as fb_exc:
+                        fallback_failed = True
+                        logger.warning(f"[Yfinance] NDX100 备用 QQQ 异常: {fb_exc}")
+                        fallback = None
+
+                    if fallback:
+                        fallback['proxy'] = True
+                        fallback['source'] = 'nasdaq100_qqq_etf_proxy'
+                        fallback['name'] = '纳斯达克100指数 (QQQ ETF 代理)'
+                        results.append(fallback)
+                        logger.info("[Yfinance] NDX100 回落至 QQQ ETF 数据（标记为代理）")
+                    else:
+                        # 双重失败：保留 NDX100 占位行，UI 显示"数据暂不可用"
+                        results.append(self._make_unavailable_index_entry(code, '纳斯达克100指数'))
+                        logger.warning("[Yfinance] NDX100 主备都失败，写入 data_unavailable 占位")
 
             if results:
                 logger.info(f"[Yfinance] 成功获取 {len(results)} 个美股指数行情")
