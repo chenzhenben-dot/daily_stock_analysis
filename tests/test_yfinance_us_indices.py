@@ -104,6 +104,7 @@ class TestGetUsMainIndices(unittest.TestCase):
             mapping = {
                 'SPX': ('^GSPC', '标普500指数'),
                 'IXIC': ('^IXIC', '纳斯达克综合指数'),
+                'NDX': ('^NDX', '纳斯达克100指数'),
                 'DJI': ('^DJI', '道琼斯工业指数'),
                 'VIX': ('^VIX', 'VIX恐慌指数'),
             }
@@ -118,6 +119,10 @@ class TestGetUsMainIndices(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIsInstance(result, list)
         self.assertGreaterEqual(len(result), 1)
+        self.assertEqual(
+            [item['code'] for item in result],
+            ['SPX', 'IXIC', 'NDX', 'DJI', 'VIX'],
+        )
         for item in result:
             self.assertIn('code', item)
             self.assertIn('name', item)
