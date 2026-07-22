@@ -2640,6 +2640,41 @@ class DataFetcherManager:
     def get_market_stats(self, *, purpose: str = "unspecified") -> Dict[str, Any]:
         """获取市场涨跌统计（自动切换数据源）"""
         logger.info("[MarketStats] component=market_stats action=start purpose=%s", purpose)
+        market_region = purpose.rsplit(":", 1)[-1].lower() if purpose.startswith("market_review:") else None
+        if market_region == "us":
+            for fetcher in self._get_fetchers_snapshot():
+                if getattr(fetcher, "name", "") != "MoomooFetcher":
+                    continue
+                started_at = time.monotonic()
+                try:
+                    data = fetcher.get_market_stats()
+                    elapsed = time.monotonic() - started_at
+                    if data:
+                        logger.info(
+                            "[MarketStats] component=market_stats action=provider_success "
+                            "purpose=%s provider=MoomooFetcher elapsed=%.2fs",
+                            purpose,
+                            elapsed,
+                        )
+                        return data
+                    logger.info(
+                        "[MarketStats] component=market_stats action=provider_empty "
+                        "purpose=%s provider=MoomooFetcher elapsed=%.2fs",
+                        purpose,
+                        elapsed,
+                    )
+                except Exception as e:
+                    elapsed = time.monotonic() - started_at
+                    logger.warning(
+                        "[MarketStats] component=market_stats action=provider_failed "
+                        "purpose=%s provider=MoomooFetcher elapsed=%.2fs error=%s",
+                        purpose,
+                        elapsed,
+                        e,
+                    )
+            logger.warning("[MarketStats] component=market_stats action=complete status=empty purpose=%s", purpose)
+            return {}
+
         tickflow_fetcher = self._get_tickflow_fetcher()
         if tickflow_fetcher is not None:
             started_at = time.monotonic()

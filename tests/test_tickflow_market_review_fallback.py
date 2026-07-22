@@ -5,9 +5,12 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+if "fake_useragent" not in sys.modules:
+    sys.modules["fake_useragent"] = MagicMock()
 
 from data_provider.base import DataFetcherManager
 
@@ -103,6 +106,42 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
 
         self.assertEqual(data, [{"code": "^GSPC"}])
         self.assertEqual(fallback.index_calls, 1)
+
+    def test_us_market_stats_uses_moomoo_and_skips_tickflow(self):
+        manager = DataFetcherManager.__new__(DataFetcherManager)
+        moomoo = _DummyFetcher(
+            "MoomooFetcher",
+            stats={"up_count": 7, "down_count": 3, "flat_count": 1},
+        )
+        manager._fetchers = [moomoo]
+        manager._get_fetchers_snapshot = lambda: [moomoo]
+        manager._get_tickflow_fetcher = lambda: self.fail(
+            "TickFlow should not be called for US market stats"
+        )
+
+        data = DataFetcherManager.get_market_stats(manager, purpose="market_review:us")
+
+        self.assertEqual(data["up_count"], 7)
+        self.assertEqual(moomoo.stats_calls, 1)
+
+    def test_us_market_stats_does_not_fall_back_to_cn_sources(self):
+        manager = DataFetcherManager.__new__(DataFetcherManager)
+        moomoo = _DummyFetcher("MoomooFetcher", stats=None)
+        cn_fallback = _DummyFetcher(
+            "AkshareFetcher",
+            stats={"up_count": 4000, "down_count": 1000, "flat_count": 200},
+        )
+        manager._fetchers = [moomoo, cn_fallback]
+        manager._get_fetchers_snapshot = lambda: [moomoo, cn_fallback]
+        manager._get_tickflow_fetcher = lambda: self.fail(
+            "TickFlow should not be called for US market stats"
+        )
+
+        data = DataFetcherManager.get_market_stats(manager, purpose="market_review:us")
+
+        self.assertEqual(data, {})
+        self.assertEqual(moomoo.stats_calls, 1)
+        self.assertEqual(cn_fallback.stats_calls, 0)
 
     def test_manager_falls_back_when_tickflow_market_stats_fails(self):
         manager = DataFetcherManager.__new__(DataFetcherManager)
