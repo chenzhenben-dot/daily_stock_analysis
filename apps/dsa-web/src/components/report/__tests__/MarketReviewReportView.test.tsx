@@ -130,8 +130,8 @@ describe('MarketReviewReportView', () => {
     expect(screen.getByText('No review summary yet')).toBeInTheDocument();
     expect(screen.getByText('Market Sentiment')).toBeInTheDocument();
     expect(screen.getByText('No score yet')).toBeInTheDocument();
-    expect(screen.getByText('Rotation & Funds')).toBeInTheDocument();
-    expect(screen.getByText('No rotation view yet')).toBeInTheDocument();
+    expect(screen.getByText('Breadth & Liquidity')).toBeInTheDocument();
+    expect(screen.getByText('No breadth/liquidity view yet')).toBeInTheDocument();
     expect(screen.getByText('Risks & Watchlist')).toBeInTheDocument();
     expect(screen.getByText('No key observations yet')).toBeInTheDocument();
     expect(screen.queryByText('复盘摘要')).not.toBeInTheDocument();
@@ -276,8 +276,8 @@ describe('MarketReviewReportView', () => {
         downCount: 1145,
         limitUpCount: 222,
         limitDownCount: 12,
-        totalAmount: 36822.49698199988,
-        turnoverUnit: 'bn',
+        totalAmount: 3682249698199.88,
+        turnoverUnit: 'CNY 100m',
       },
       indices: [{
         code: '000001',
@@ -285,7 +285,7 @@ describe('MarketReviewReportView', () => {
         current: 4112.446,
         changePct: 0.44079750937683315,
         high: 4143.314,
-        low: 4087.536,
+        low: 4087.54,
       }],
     };
 
@@ -297,7 +297,7 @@ describe('MarketReviewReportView', () => {
       />,
     );
 
-    expect(screen.getByText('36822.50 bn')).toBeInTheDocument();
+    expect(screen.getByText('36822.50 CNY 100m')).toBeInTheDocument();
     expect(screen.getByText('4112.45')).toBeInTheDocument();
     expect(screen.getByText('0.44%')).toBeInTheDocument();
     expect(screen.getByText('4143.31 / 4087.54')).toBeInTheDocument();
@@ -318,8 +318,8 @@ describe('MarketReviewReportView', () => {
         downCount: '1,145',
         limitUpCount: '0',
         limitDownCount: '12',
-        totalAmount: '36,822.49698199988',
-        turnoverUnit: 'bn',
+        totalAmount: '3682249698199.88',
+        turnoverUnit: 'CNY 100m',
       },
       indices: [{
         code: '000001',
@@ -340,11 +340,105 @@ describe('MarketReviewReportView', () => {
     );
 
     expect(screen.getByText('4327')).toBeInTheDocument();
-    expect(screen.getByText('36822.50 bn')).toBeInTheDocument();
+    expect(screen.getByText('36822.50 CNY 100m')).toBeInTheDocument();
     expect(screen.getByText('4112.45')).toBeInTheDocument();
     expect(screen.getByText('0.44%')).toBeInTheDocument();
     expect(screen.queryByText('0.00 / 0.00')).not.toBeInTheDocument();
     expect(screen.queryByText(/0\.440797/)).not.toBeInTheDocument();
+  });
+
+  it('scales raw USD turnover into USD bn and shows Moomoo source/sample size', () => {
+    const payload: MarketReviewPayload = {
+      version: 1,
+      kind: 'market_review',
+      region: 'us',
+      language: 'zh',
+      title: '美股大盘复盘',
+      rootTitle: '美股大盘复盘',
+      breadth: {
+        upCount: 983,
+        downCount: 913,
+        flatCount: 104,
+        totalAmount: 189727840037,
+        turnoverUnit: '十亿美元',
+        marketStatsSource: 'moomoo_us_exchange_universe',
+        marketStatsSampleSize: 2000,
+      },
+      indices: [],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    };
+
+    render(
+      <MarketReviewReportView
+        payload={payload}
+        content="# 美股大盘复盘"
+        reportLanguage="zh"
+      />,
+    );
+
+    expect(screen.getByText('189.73 十亿美元')).toBeInTheDocument();
+    expect(
+      screen.getByText('来源：moomoo_us_exchange_universe · 覆盖样本：2,000 只'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('涨停/跌停')).not.toBeInTheDocument();
+  });
+
+  it('uses Breadth & Liquidity label and Rotation & Funds is gone', () => {
+    const report: AnalysisReport = {
+      meta: {
+        queryId: 'market-review-q-us',
+        stockCode: 'MARKET',
+        stockName: 'Market Review',
+        reportType: 'market_review',
+        reportLanguage: 'en',
+        createdAt: '2026-07-22T08:00:00Z',
+      },
+      summary: {
+        analysisSummary: '',
+        operationAdvice: 'breadth expanding, risk appetite recovering',
+        trendPrediction: '',
+        sentimentScore: 60,
+      },
+    };
+    const payload: MarketReviewPayload = {
+      version: 1,
+      kind: 'market_review',
+      region: 'us',
+      language: 'en',
+      title: 'Market Review',
+      rootTitle: 'Market Review',
+      breadth: {
+        upCount: 100,
+        downCount: 80,
+        totalAmount: 1e11,
+        turnoverUnit: 'USD bn',
+        marketStatsSource: 'moomoo_us_exchange_universe',
+        marketStatsSampleSize: 2000,
+      },
+      indices: [],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    };
+
+    render(
+      <MarketReviewReportView
+        report={report}
+        payload={payload}
+        content="# Market Review"
+        reportLanguage="en"
+      />,
+    );
+
+    expect(screen.getByText('Breadth & Liquidity')).toBeInTheDocument();
+    expect(screen.queryByText('Rotation & Funds')).not.toBeInTheDocument();
+    expect(screen.getByText('Source: moomoo_us_exchange_universe · Sample size: 2,000')).toBeInTheDocument();
   });
 
   it('opens run flow for historical market review records', () => {

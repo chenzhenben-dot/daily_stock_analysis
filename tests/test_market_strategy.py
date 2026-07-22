@@ -32,7 +32,8 @@ class TestMarketStrategyBlueprint(unittest.TestCase):
 
         self.assertIn("US Market Regime Strategy", block)
         self.assertIn("Risk-on", block)
-        self.assertIn("Macro & Flows", block)
+        self.assertIn("Macro & Risk Appetite", block)
+        self.assertNotIn("Macro & Flows", block)
 
 
 class TestMarketAnalyzerStrategyPrompt(unittest.TestCase):
@@ -86,6 +87,7 @@ class TestMarketAnalyzerStrategyPrompt(unittest.TestCase):
         self.assertNotIn("US Market Regime Strategy", prompt)
         self.assertNotIn("Strategy Blueprint", prompt)
         self.assertIn("风险偏好", prompt)
+        self.assertIn("Macro & Risk Appetite", prompt)
 
     def test_jp_kr_prompt_uses_region_aware_chinese_shell(self):
         cases = [

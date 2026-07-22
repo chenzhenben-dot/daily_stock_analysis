@@ -49,7 +49,7 @@ _CHINESE_SECTION_PATTERNS = {
     "market_summary": r"###\s*一、(?:盘面总览|市场总结)",
     "index_commentary": r"###\s*二、(?:指数结构|指数点评|主要指数)",
     "sector_highlights": r"###\s*三、(?:板块主线|热点解读|板块表现)",
-    "funds_sentiment": r"###\s*四、(?:资金与情绪|资金动向)",
+    "funds_sentiment": r"###\s*四、(?:资金与情绪|资金动向|市场宽度与流动性)",
     "news_catalysts": r"###\s*五、(?:消息催化|后市展望)",
 }
 
@@ -94,9 +94,11 @@ class MarketOverview:
     up_count: int = 0                   # 上涨家数
     down_count: int = 0                 # 下跌家数
     flat_count: int = 0                 # 平盘家数
-    limit_up_count: int = 0             # 涨停家数
-    limit_down_count: int = 0           # 跌停家数
-    total_amount: float = 0.0           # 两市成交额（亿元）
+    limit_up_count: int = 0             # 涨停家数（CN 专属，其它市场保持 0）
+    limit_down_count: int = 0           # 跌停家数（CN 专属，其它市场保持 0）
+    total_amount: float = 0.0           # 市场原始货币成交额；单位由 region 决定（CN=亿，其它=十亿本地货币）
+    market_stats_source: Optional[str] = None         # 涨跌统计/成交额来源标识，如 moomoo_us_exchange_universe
+    market_stats_sample_size: Optional[int] = None    # 该来源覆盖样本量（仅作流动性参考，不代表全市场）
     # north_flow: float = 0.0           # 北向资金净流入（亿元）- 已废弃，接口不可用
     
     # 板块涨幅榜
@@ -207,6 +209,29 @@ class MarketAnalyzer:
         if amount_raw > 1e6:
             return f"{amount_raw / 1e8:.0f}"
         return f"{amount_raw:.0f}"
+
+    def _format_turnover_text(self, amount_raw: float) -> str:
+        """Render a human-readable turnover string for the current region/language."""
+        unit = self._get_turnover_unit_label()
+        if amount_raw == 0.0:
+            return f"N/A ({unit})"
+        if self.region in ("us", "hk", "jp", "kr"):
+            return f"{amount_raw / 1e9:.2f} {unit}"
+        if amount_raw > 1e6:
+            return f"{amount_raw / 1e8:.0f} {unit}"
+        return f"{amount_raw:.0f} {unit}"
+
+    def _build_market_stats_source_note(self, overview: MarketOverview) -> Optional[str]:
+        """Render a brief source/sample-size annotation for the market stats block."""
+        if overview.market_stats_source is None and overview.market_stats_sample_size is None:
+            return None
+        source = overview.market_stats_source or "未标注"
+        if overview.market_stats_sample_size:
+            return (
+                f"来源: {source} · 覆盖样本: {overview.market_stats_sample_size:,} 只 "
+                "（仅作流动性参考，不构成全市场统计）"
+            )
+        return f"来源: {source}（仅作流动性参考，不构成全市场统计）"
 
     def _get_index_change_arrow(self, change_pct: float) -> str:
         if change_pct == 0:
@@ -324,6 +349,8 @@ Focus on KOSPI, KOSDAQ, semiconductor heavyweights, and global technology risk a
 - Neutral: index or heavyweight divergence; keep sizing controlled and wait for confirmation.
 - Risk-off: technology heavyweights weaken or external risk rises; prioritize drawdown control."""
         if self.region == "us" and self._get_review_language() == "zh":
+            # US 中文 prompt：标题与维度文案用中文，但保留英文 dimension 关键词
+            # （Macro & Risk Appetite / Breadth & Liquidity），避免 LLM 编造资金净流入/流出结论。
             return """## 美股市场三段式复盘策略
 聚焦指数趋势、宏观叙事与板块轮动，给出次日风控与仓位框架。
 
@@ -334,7 +361,8 @@ Focus on KOSPI, KOSDAQ, semiconductor heavyweights, and global technology risk a
 
 ### 分析维度
 - 趋势结构：明确市场处于上冲、震荡还是防守转向，判断是否存在关键支撑位背离。
-- 资金与情绪：区分宏观政策、货币面与波动率对权益风险的影响。
+- 市场宽度与流动性 (Breadth & Liquidity)：区分宏观政策、货币面与波动率对权益风险的影响；无 ETF 资金流、交易所净流入或机构资金数据时，禁止输出资金净流入、资金净流出、主力资金进入或撤离等无依据结论，可改为风险偏好回升/上涨覆盖面扩大/样本成交活跃等中性表述。
+- 宏观与风险偏好 (Macro & Risk Appetite)：把政策与利率叙事映射为权益风险偏好；关注美债收益率与美元含义、宽度与领导板块集中度、防御 vs 成长因子轮动。
 - 主题线索：识别持续性最强的主题与板块轮动是否形成可交易主线。
 
 ### 行动框架
@@ -393,7 +421,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if self.region == "us" and review_language == "zh":
             return """### 六、策略框架
 - **趋势结构**：判断市场在进攻、震荡与防守中的状态是否一致。
-- **资金与情绪**：结合波动率、宽度和主题轮动评估风险偏好。
+- **市场宽度与流动性**：结合波动率、宽度和样本成交活跃度评估风险偏好；无 ETF 资金流、交易所净流入或机构资金数据时，禁止输出资金净流入/资金净流出/主力资金等无依据结论。
 - **主题主线**：识别可延续和可放大的行业主线与防守线索。
 """
         if not (self.region == "cn" and review_language == "en"):
@@ -526,10 +554,16 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 overview.limit_up_count = stats.get('limit_up_count', 0)
                 overview.limit_down_count = stats.get('limit_down_count', 0)
                 overview.total_amount = stats.get('total_amount', 0.0)
+                overview.market_stats_source = stats.get('source') or stats.get('market_stats_source')
+                overview.market_stats_sample_size = (
+                    stats.get('sample_size')
+                    if stats.get('sample_size') is not None
+                    else stats.get('market_stats_sample_size')
+                )
 
                 logger.info(
                     "[大盘] %s action=get_market_stats status=success up=%s down=%s flat=%s "
-                    "limit_up=%s limit_down=%s amount=%.0f亿",
+                    "limit_up=%s limit_down=%s amount=%.0f source=%s sample_size=%s unit=%s",
                     self._log_context(),
                     overview.up_count,
                     overview.down_count,
@@ -537,6 +571,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     overview.limit_up_count,
                     overview.limit_down_count,
                     overview.total_amount,
+                    overview.market_stats_source,
+                    overview.market_stats_sample_size,
+                    self._get_turnover_unit_label(),
                 )
             else:
                 logger.warning("[大盘] %s action=get_market_stats status=empty", self._log_context())
@@ -840,13 +877,19 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             payload["market_light"] = light
 
         if has_breadth_data:
+            turnover_unit = self._get_turnover_unit_label()
             breadth_payload = {
                 "up_count": overview.up_count,
                 "down_count": overview.down_count,
                 "flat_count": overview.flat_count,
                 "total_amount": overview.total_amount,
-                "turnover_unit": self._get_turnover_unit_label(),
+                "turnover_unit": turnover_unit,
+                "formatted_turnover": self._format_turnover_text(overview.total_amount),
             }
+            if overview.market_stats_source:
+                breadth_payload["market_stats_source"] = overview.market_stats_source
+            if overview.market_stats_sample_size:
+                breadth_payload["market_stats_sample_size"] = overview.market_stats_sample_size
             if self._supports_limit_up_down_stats():
                 breadth_payload.update(
                     {
@@ -860,7 +903,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _supports_limit_up_down_stats(self) -> bool:
         """Whether this market has A-share style daily limit-up/down statistics."""
-        return self.region == "cn"
+        return bool(getattr(self.profile, "has_limit_up_down_stats", False))
 
     def _supports_market_light(self) -> bool:
         return self.region in MARKET_LIGHT_REGIONS
@@ -1083,7 +1126,11 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             dimensions=scores["dimensions"],
             data_quality=str(scores["data_quality"]),
         )
-        return snapshot.model_dump()
+        dumped = snapshot.model_dump()
+        # US/HK/JP/KR 没有涨跌停维度；strip 掉 limit 键，保证下游 payload 与前端不渲染 limit 卡片。
+        if not self._supports_limit_up_down_stats():
+            dumped.get("dimensions", {}).pop("limit", None)
+        return dumped
 
     def _build_market_light_reasons_zh(self, overview: MarketOverview, score: int) -> List[str]:
         participation = overview.up_count + overview.down_count
@@ -1279,15 +1326,26 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
     def _escape_markdown_link_label(value: str) -> str:
         return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
-    @staticmethod
-    def _describe_turnover(total_amount: float) -> str:
-        if total_amount >= 15000:
-            return "高活跃度"
-        if total_amount >= 9000:
-            return "中等活跃"
-        if total_amount > 0:
-            return "缩量观望"
-        return "暂无数据"
+    def _describe_turnover(self, total_amount: float) -> str:
+        """Describe turnover activity for the current region.
+
+        CN uses absolute CNY 100m thresholds; US/HK/JP/KR only have a sample-level
+        USD/local-currency turnover figure that is not comparable to the full
+        exchange, so we render a neutral liquidity note instead.
+        """
+        if self.region == "cn":
+            if total_amount >= 15000:
+                return "高活跃度"
+            if total_amount >= 9000:
+                return "中等活跃"
+            if total_amount > 0:
+                return "缩量观望"
+            return "暂无数据"
+
+        # Non-CN: no reliable historical baseline; render a neutral sample-level note.
+        if total_amount <= 0:
+            return "暂无数据"
+        return "样本成交额，仅作流动性参考"
 
     def _build_market_light_scores(self, overview: MarketOverview) -> Dict[str, Any]:
         """Build the canonical Market Light scores used by reports and alerts."""
@@ -1305,17 +1363,19 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             avg_change = sum(index_changes) / len(index_changes)
             index_score = int(max(0, min(100, 50 + avg_change * 12)))
 
+        supports_limit = self._supports_limit_up_down_stats()
         limit_total = overview.limit_up_count + overview.limit_down_count
-        limit_available = bool(self.profile.has_market_stats and limit_total > 0)
+        limit_available = bool(supports_limit and limit_total > 0)
         limit_score = 50
         if limit_available:
             limit_score = int(overview.limit_up_count / limit_total * 100)
 
-        dimensions = {
+        dimensions: Dict[str, Dict[str, Any]] = {
             "breadth": {"score": breadth_score, "available": breadth_available},
             "index": {"score": index_score, "available": index_available},
-            "limit": {"score": limit_score, "available": limit_available},
         }
+        if supports_limit:
+            dimensions["limit"] = {"score": limit_score, "available": limit_available}
 
         if not index_available:
             data_quality = "unavailable"
@@ -1324,7 +1384,16 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         else:
             data_quality = "partial"
 
-        score = int(round(breadth_score * 0.45 + index_score * 0.35 + limit_score * 0.20))
+        if supports_limit:
+            score = int(
+                round(
+                    breadth_score * 0.45
+                    + index_score * 0.35
+                    + limit_score * 0.20
+                )
+            )
+        else:
+            score = int(round(breadth_score * 0.55 + index_score * 0.45))
         if self._get_review_language() == "en":
             if score >= 70:
                 label = "risk-on"
@@ -1358,10 +1427,25 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _build_output_template_sections(self, review_language: str) -> str:
         """Build LLM output sections according to market data capabilities."""
+        # US 没有真实资金流数据；标题固定为 Breadth & Liquidity / 市场宽度与流动性
+        # 来防止 LLM 编造 资金净流入/资金净流出 之类的结论。
+        breadth_section_en_title = (
+            "Breadth & Liquidity" if self.region == "us" else "Fund Flows"
+        )
+        breadth_section_zh_title = (
+            "市场宽度与流动性" if self.region != "cn" else "资金与情绪"
+        )
+        breadth_section_zh_hint = (
+            "成交额、市场宽度和风险偏好"
+            if self.region != "cn"
+            else ("成交额、涨跌停结构、市场宽度和风险偏好"
+                  if self._supports_limit_up_down_stats()
+                  else "成交额、市场宽度和风险偏好")
+        )
         if review_language == "en":
             if self.profile.has_market_stats and self.profile.has_sector_rankings:
-                return """### 3. Fund Flows
-(Interpret what turnover, participation, and flow signals imply.)
+                return f"""### 3. {breadth_section_en_title}
+(Interpret what turnover, participation, and flow signals imply. For US, do not infer net fund flows without ETF fund-flow, exchange net flow, or institutional flow data; describe risk appetite, breadth, and sample liquidity instead.)
 
 ### 4. Sector Highlights
 (Distinguish industry-sector moves from concept/theme moves, then analyze drivers and persistence.)
@@ -1378,8 +1462,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             section_number = 3
             sections: List[str] = []
             if self.profile.has_market_stats:
-                sections.append(f"""### {section_number}. Fund Flows
-(Interpret only the provided turnover, participation, breadth, and flow signals.)""")
+                sections.append(f"""### {section_number}. {breadth_section_en_title}
+(Interpret only the provided turnover, participation, breadth, and flow signals. For US, do not infer net fund flows without ETF fund-flow, exchange net flow, or institutional flow data; describe risk appetite, breadth, and sample liquidity instead.)""")
                 section_number += 1
             if self.profile.has_sector_rankings:
                 sections.append(f"""### {section_number}. Sector Highlights
@@ -1398,14 +1482,11 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             return "\n\n".join(sections)
 
         if self.profile.has_market_stats and self.profile.has_sector_rankings:
-            liquidity_hint = "成交额、涨跌停结构、市场宽度和风险偏好"
-            if not self._supports_limit_up_down_stats():
-                liquidity_hint = "成交额、市场宽度和风险偏好"
-            return """### 三、板块主线
+            return f"""### 三、板块主线
 （区分行业板块与概念题材，分析领涨/领跌背后的逻辑、持续性和是否形成主线）
 
-### 四、资金与情绪
-（解读%s）
+### 四、{breadth_section_zh_title}
+（解读{breadth_section_zh_hint}；无 ETF 资金流、交易所净流入或机构资金数据时，禁止输出资金净流入、资金净流出、主力资金进入或撤离等无依据结论，可改为风险偏好回升/上涨覆盖面扩大/样本成交活跃等中性表述）
 
 ### 五、消息催化
 （结合近三日新闻，提炼真正影响明日交易的催化或扰动）
@@ -1414,7 +1495,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 （给出进攻/均衡/防守结论、仓位区间、关注方向、回避方向和一个触发失效条件）
 
 ### 七、风险提示
-（列出需要关注的风险点；最后补充“建议仅供参考，不构成投资建议”。）""" % liquidity_hint
+（列出需要关注的风险点；最后补充“建议仅供参考，不构成投资建议”。）"""
 
         numerals = ["一", "二", "三", "四", "五", "六", "七", "八"]
         section_number = 3
@@ -1431,7 +1512,15 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             liquidity_hint = "（仅解读已提供的成交额、市场宽度和风险偏好数据）"
             if self._supports_limit_up_down_stats():
                 liquidity_hint = "（仅解读已提供的成交额、涨跌停结构、市场宽度和风险偏好数据）"
-            add_section("资金与情绪", liquidity_hint)
+            if self.region == "cn":
+                add_section("资金与情绪", liquidity_hint)
+            else:
+                # 非 CN 没有真实资金流数据；禁止编造资金净流入/流出/主力资金结论。
+                add_section(
+                    "市场宽度与流动性",
+                    liquidity_hint
+                    + "；无 ETF 资金流、交易所净流入或机构资金数据时，禁止输出资金净流入、资金净流出、主力资金进入或撤离等无依据结论，可改为风险偏好回升/上涨覆盖面扩大/样本成交活跃等中性表述",
+                )
         add_section(
             "消息催化",
             "（结合近三日新闻和指数表现，提炼真正影响明日交易的催化或扰动；不要推断未提供的资金流、市场宽度或板块榜）",
@@ -1534,7 +1623,16 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
                 ]
                 if self._supports_limit_up_down_stats():
                     stats_lines.append(f"- 涨停: {overview.limit_up_count} 家 | 跌停: {overview.limit_down_count} 家")
-                stats_lines.append(f"- 两市成交额: {overview.total_amount:.0f} 亿元")
+                # CN: 「两市成交额 / 亿元」；非 CN: 「成交额 / 十亿X元」并标注来源/样本量，
+                # 防止 LLM 误以为这是全市场成交额。
+                if self.region == "cn":
+                    stats_lines.append(f"- 两市成交额: {overview.total_amount / 1e8:.0f} 亿元")
+                else:
+                    unit = self._get_turnover_unit_label()
+                    stats_lines.append(f"- 成交额: {self._format_turnover_value(overview.total_amount)} {unit}")
+                    source_note = self._build_market_stats_source_note(overview)
+                    if source_note:
+                        stats_lines.append(f"- {source_note}")
                 stats_block = "\n".join(stats_lines)
 
             if self.profile.has_sector_rankings:
@@ -1839,8 +1937,8 @@ Market conditions can change quickly. The data above is for reference only and d
         )
         funds_section = (
             """
-### 四、资金与情绪
-- 结合成交额和涨跌家数看，当前更适合等待确认，避免仅凭单一热点追高。
+### 四、市场宽度与流动性
+- 结合样本成交额和涨跌家数看，当前更适合等待确认，避免仅凭单一热点追高；本节不输出资金净流入/资金净流出/主力资金等无依据结论。
 """
             if self.profile.has_market_stats
             else ""

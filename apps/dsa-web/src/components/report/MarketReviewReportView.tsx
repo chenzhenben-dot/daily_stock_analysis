@@ -242,11 +242,33 @@ const formatMarketCount = (value: unknown): string => {
 };
 
 const formatMarketAmount = (value: unknown, unit?: string): string => {
-  const formattedValue = formatMarketNumber(value);
-  if (formattedValue === '-') {
+  const numericValue = coerceFiniteNumber(value);
+  if (numericValue === null) {
     return '-';
   }
-  return unit ? `${formattedValue} ${unit}` : formattedValue;
+  if (!unit) {
+    return numericValue.toFixed(0);
+  }
+  // Backend stores raw turnover; UI scales per region to keep numbers readable.
+  // CN uses 亿 (1e8); US/HK/JP/KR use 十亿 (1e9) of the local currency.
+  const isLocalCurrencyBillion =
+    unit.startsWith('USD bn') ||
+    unit.startsWith('HKD bn') ||
+    unit.startsWith('JPY bn') ||
+    unit.startsWith('KRW bn') ||
+    unit === '十亿美元' ||
+    unit === '十亿港元' ||
+    unit === '十亿日元' ||
+    unit === '十亿韩元';
+  if (isLocalCurrencyBillion) {
+    return `${(numericValue / 1e9).toFixed(2)} ${unit}`;
+  }
+  // Fallback (e.g. CNY 100m / 亿元): render the value as-is, scaled by 1e8 when
+  // the backend has already provided raw CNY.
+  if (numericValue > 1e6 && (unit === '亿元' || unit === 'CNY 100m')) {
+    return `${(numericValue / 1e8).toFixed(2)} ${unit}`;
+  }
+  return `${numericValue.toFixed(0)} ${unit}`;
 };
 
 const formatMarketPercent = (value: unknown): string => {
@@ -274,6 +296,7 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
   decliners: string;
   limitUpDown: string;
   turnover: string;
+  sourceNote: string;
   index: string;
   last: string;
   change: string;
@@ -292,8 +315,8 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     reviewSummary: '复盘摘要',
     noReviewSummary: '暂无摘要',
     noSentimentScore: '暂无评分',
-    rotationAndFunds: '轮动与资金',
-    noRotationView: '暂无轮动观点',
+    rotationAndFunds: '市场宽度与流动性',
+    noRotationView: '暂无宽度与流动性观点',
     riskAndWatch: '风险与观察',
     noRiskWatch: '暂无观察重点',
     structuredMarketData: '结构化大盘数据',
@@ -302,6 +325,7 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     decliners: '下跌家数',
     limitUpDown: '涨停/跌停',
     turnover: '成交额',
+    sourceNote: '来源：{source} · 覆盖样本：{sample} 只',
     index: '指数',
     last: '最新',
     change: '涨跌幅',
@@ -320,8 +344,8 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     reviewSummary: 'Review Summary',
     noReviewSummary: 'No review summary yet',
     noSentimentScore: 'No score yet',
-    rotationAndFunds: 'Rotation & Funds',
-    noRotationView: 'No rotation view yet',
+    rotationAndFunds: 'Breadth & Liquidity',
+    noRotationView: 'No breadth/liquidity view yet',
     riskAndWatch: 'Risks & Watchlist',
     noRiskWatch: 'No key observations yet',
     structuredMarketData: 'Structured Market Data',
@@ -330,6 +354,7 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     decliners: 'Decliners',
     limitUpDown: 'Limit Up/Down',
     turnover: 'Turnover',
+    sourceNote: 'Source: {source} · Sample size: {sample}',
     index: 'Index',
     last: 'Last',
     change: 'Change',
@@ -348,8 +373,8 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     reviewSummary: '리뷰 요약',
     noReviewSummary: '요약 없음',
     noSentimentScore: '점수 없음',
-    rotationAndFunds: '순환과 자금',
-    noRotationView: '순환 관점 없음',
+    rotationAndFunds: '시장 폭과 유동성',
+    noRotationView: '폭/유동성 관점 없음',
     riskAndWatch: '리스크와 관찰',
     noRiskWatch: '관찰 포인트 없음',
     structuredMarketData: '구조화 시장 데이터',
@@ -358,6 +383,7 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     decliners: '하락 종목 수',
     limitUpDown: '상한가/하한가',
     turnover: '거래대금',
+    sourceNote: '출처: {source} · 표본 크기: {sample}',
     index: '지수',
     last: '현재',
     change: '등락률',
@@ -674,34 +700,48 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                   <h4 className="text-sm font-semibold text-foreground">{activeMarketData.title}</h4>
                 ) : null}
                 {activeMarketData.breadth ? (
-                  <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
-                    <div className="rounded-lg border border-subtle p-3">
-                      <p className="label-uppercase">{marketReviewText.advancers}</p>
-                      <p className="mt-1 font-semibold text-foreground">
-                        {formatMarketCount(activeMarketData.breadth.upCount)}
-                      </p>
-                    </div>
-                    <div className="rounded-lg border border-subtle p-3">
-                      <p className="label-uppercase">{marketReviewText.decliners}</p>
-                      <p className="mt-1 font-semibold text-foreground">
-                        {formatMarketCount(activeMarketData.breadth.downCount)}
-                      </p>
-                    </div>
-                    {activeMarketData.breadth.limitUpCount !== undefined || activeMarketData.breadth.limitDownCount !== undefined ? (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
                       <div className="rounded-lg border border-subtle p-3">
-                        <p className="label-uppercase">{marketReviewText.limitUpDown}</p>
+                        <p className="label-uppercase">{marketReviewText.advancers}</p>
                         <p className="mt-1 font-semibold text-foreground">
-                          {formatMarketCount(activeMarketData.breadth.limitUpCount)} /{' '}
-                          {formatMarketCount(activeMarketData.breadth.limitDownCount)}
+                          {formatMarketCount(activeMarketData.breadth.upCount)}
                         </p>
                       </div>
-                    ) : null}
-                    <div className="rounded-lg border border-subtle p-3">
-                      <p className="label-uppercase">{marketReviewText.turnover}</p>
-                      <p className="mt-1 font-semibold text-foreground">
-                        {formatMarketAmount(activeMarketData.breadth.totalAmount, activeMarketData.breadth.turnoverUnit)}
-                      </p>
+                      <div className="rounded-lg border border-subtle p-3">
+                        <p className="label-uppercase">{marketReviewText.decliners}</p>
+                        <p className="mt-1 font-semibold text-foreground">
+                          {formatMarketCount(activeMarketData.breadth.downCount)}
+                        </p>
+                      </div>
+                      {activeMarketData.breadth.limitUpCount !== undefined || activeMarketData.breadth.limitDownCount !== undefined ? (
+                        <div className="rounded-lg border border-subtle p-3">
+                          <p className="label-uppercase">{marketReviewText.limitUpDown}</p>
+                          <p className="mt-1 font-semibold text-foreground">
+                            {formatMarketCount(activeMarketData.breadth.limitUpCount)} /{' '}
+                            {formatMarketCount(activeMarketData.breadth.limitDownCount)}
+                          </p>
+                        </div>
+                      ) : null}
+                      <div className="rounded-lg border border-subtle p-3">
+                        <p className="label-uppercase">{marketReviewText.turnover}</p>
+                        <p className="mt-1 font-semibold text-foreground">
+                          {formatMarketAmount(activeMarketData.breadth.totalAmount, activeMarketData.breadth.turnoverUnit)}
+                        </p>
+                      </div>
                     </div>
+                    {activeMarketData.breadth.marketStatsSource || activeMarketData.breadth.marketStatsSampleSize ? (
+                      <p className="text-xs text-secondary-text">
+                        {marketReviewText.sourceNote
+                          .replace('{source}', activeMarketData.breadth.marketStatsSource ?? '未标注')
+                          .replace(
+                            '{sample}',
+                            activeMarketData.breadth.marketStatsSampleSize
+                              ? activeMarketData.breadth.marketStatsSampleSize.toLocaleString('zh-CN')
+                              : '—',
+                          )}
+                      </p>
+                    ) : null}
                   </div>
                 ) : (
                   <p className="text-sm text-secondary-text">{marketReviewText.noBreadthData}</p>

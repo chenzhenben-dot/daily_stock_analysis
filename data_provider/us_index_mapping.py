@@ -31,8 +31,11 @@ US_INDEX_MAPPING = {
     'IXIC': ('^IXIC', '纳斯达克综合指数'),
     '^IXIC': ('^IXIC', '纳斯达克综合指数'),
     'NASDAQ': ('^IXIC', '纳斯达克综合指数'),
-    # 纳斯达克 100
-    'NDX': ('^NDX', '纳斯达克100指数'),
+    'COMP': ('^IXIC', '纳斯达克综合指数'),
+    # 纳斯达克 100（独立指数，不要与 IXIC 混淆）
+    'NDX100': ('^NDX', '纳斯达克100指数'),
+    'NASDAQ100': ('^NDX', '纳斯达克100指数'),
+    'NDX': ('^NDX', '纳斯达克100指数'),  # legacy alias used by older payloads
     '^NDX': ('^NDX', '纳斯达克100指数'),
     # VIX 波动率指数
     'VIX': ('^VIX', 'VIX恐慌指数'),

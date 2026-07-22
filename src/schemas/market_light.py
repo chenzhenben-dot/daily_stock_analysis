@@ -22,11 +22,17 @@ class MarketLightDimension(BaseModel):
 
 
 class MarketLightDimensions(BaseModel):
-    """Canonical Market Light dimension scores."""
+    """Canonical Market Light dimension scores.
+
+    The ``limit`` dimension is only populated for CN (A-share style daily
+    limit-up / limit-down statistics). US / HK / JP / KR do not have a
+    comparable market-wide limit metric, so the field is optional and the
+    score is omitted from the snapshot.
+    """
 
     breadth: MarketLightDimension
     index: MarketLightDimension
-    limit: MarketLightDimension
+    limit: MarketLightDimension | None = None
 
 
 class MarketLightSnapshot(BaseModel):

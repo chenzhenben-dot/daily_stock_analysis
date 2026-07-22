@@ -25,6 +25,8 @@ class MarketProfile:
     has_market_stats: bool
     # 市场概况是否包含板块涨跌
     has_sector_rankings: bool
+    # 市场概况是否包含 A 股式每日涨跌停统计（仅 CN 为 True；美股/港股/日股/韩股无此口径）
+    has_limit_up_down_stats: bool = False
 
 
 CN_PROFILE = MarketProfile(
@@ -38,6 +40,7 @@ CN_PROFILE = MarketProfile(
     prompt_index_hint="分析上证、深证、创业板等各指数走势特点",
     has_market_stats=True,
     has_sector_rankings=True,
+    has_limit_up_down_stats=True,
 )
 
 US_PROFILE = MarketProfile(
@@ -51,6 +54,7 @@ US_PROFILE = MarketProfile(
     prompt_index_hint="分析标普500、纳斯达克、道指等各指数走势特点",
     has_market_stats=True,
     has_sector_rankings=True,
+    has_limit_up_down_stats=False,
 )
 
 HK_PROFILE = MarketProfile(
@@ -64,6 +68,7 @@ HK_PROFILE = MarketProfile(
     prompt_index_hint="分析恒生指数、恒生科技指数、国企指数等各指数走势特点",
     has_market_stats=False,
     has_sector_rankings=False,
+    has_limit_up_down_stats=False,
 )
 
 JP_PROFILE = MarketProfile(
@@ -77,6 +82,7 @@ JP_PROFILE = MarketProfile(
     prompt_index_hint="分析日经225、东证指数等日本主要指数走势特点",
     has_market_stats=False,
     has_sector_rankings=False,
+    has_limit_up_down_stats=False,
 )
 
 KR_PROFILE = MarketProfile(
@@ -90,6 +96,7 @@ KR_PROFILE = MarketProfile(
     prompt_index_hint="分析 KOSPI、KOSDAQ 等韩国主要指数走势特点",
     has_market_stats=False,
     has_sector_rankings=False,
+    has_limit_up_down_stats=False,
 )
 
 

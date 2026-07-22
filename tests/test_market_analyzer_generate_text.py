@@ -3245,7 +3245,8 @@ Sector text.
         assert snapshot["data_quality"] == "partial"
         assert snapshot["dimensions"]["breadth"] == {"score": 50, "available": False}
         assert snapshot["dimensions"]["index"]["available"] is True
-        assert snapshot["dimensions"]["limit"] == {"score": 50, "available": False}
+        # US 没有 A 股式涨跌停统计，limit 维度不进入 snapshot。
+        assert "limit" not in snapshot["dimensions"]
 
     @pytest.mark.parametrize(
         ("region", "profile_name", "index_code", "index_name"),
@@ -3275,7 +3276,8 @@ Sector text.
         assert snapshot["data_quality"] == "partial"
         assert snapshot["dimensions"]["breadth"] == {"score": 50, "available": False}
         assert snapshot["dimensions"]["index"]["available"] is True
-        assert snapshot["dimensions"]["limit"] == {"score": 50, "available": False}
+        # JP / KR 不参与涨跌停统计，limit 维度不进入 snapshot。
+        assert "limit" not in snapshot["dimensions"]
 
     def test_market_review_payload_omits_breadth_for_markets_without_stats(self):
         from src.core.market_profile import HK_PROFILE

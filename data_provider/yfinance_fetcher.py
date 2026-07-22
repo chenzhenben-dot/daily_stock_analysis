@@ -403,9 +403,10 @@ class YfinanceFetcher(BaseFetcher):
         return None
 
     def _get_us_main_indices(self, yf) -> Optional[List[Dict[str, Any]]]:
-        """获取美股主要指数行情（SPX、IXIC、NDX、DJI、VIX），复用 _fetch_yf_ticker_data"""
-        # 大盘复盘所需核心美股指数
-        us_indices = ['SPX', 'IXIC', 'NDX', 'DJI', 'VIX']
+        """获取美股主要指数行情（SPX、IXIC、NDX100、DJI、VIX），复用 _fetch_yf_ticker_data"""
+        # 大盘复盘所需核心美股指数：标普 500 + 纳斯达克综合 + 纳斯达克 100 + 道指 + VIX。
+        # NDX100 必须始终保留；当 ^NDX 临时失败时回落到 QQQ（Invesco QQQ Trust，追踪 NDX100）。
+        us_indices = ['SPX', 'IXIC', 'NDX100', 'DJI', 'VIX']
         results = []
         try:
             for code in us_indices:
@@ -419,6 +420,15 @@ class YfinanceFetcher(BaseFetcher):
                         logger.debug(f"[Yfinance] 获取美股指数 {name} 成功")
                 except Exception as e:
                     logger.warning(f"[Yfinance] 获取美股指数 {name} 失败: {e}")
+                    if code == 'NDX100':
+                        # 备用：QQQ 追踪 NDX100，避免 NDX100 因数据源临时失败而消失。
+                        try:
+                            fallback = self._fetch_yf_ticker_data(yf, 'QQQ', '纳斯达克100指数(QQQ ETF)', code)
+                            if fallback:
+                                results.append(fallback)
+                                logger.info("[Yfinance] NDX100 回落至 QQQ ETF 数据")
+                        except Exception as fb_exc:
+                            logger.warning(f"[Yfinance] NDX100 备用 QQQ 也失败: {fb_exc}")
 
             if results:
                 logger.info(f"[Yfinance] 成功获取 {len(results)} 个美股指数行情")

@@ -266,6 +266,9 @@ export interface MarketReviewBreadth {
   limitDownCount?: number;
   totalAmount?: number;
   turnoverUnit?: string;
+  formattedTurnover?: string;
+  marketStatsSource?: string;
+  marketStatsSampleSize?: number;
 }
 
 export interface MarketReviewMacroIndicator {

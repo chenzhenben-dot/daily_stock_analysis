@@ -104,7 +104,7 @@ US_BLUEPRINT = MarketStrategyBlueprint(
             ],
         ),
         StrategyDimension(
-            name="Macro & Flows",
+            name="Macro & Risk Appetite",
             objective="Map policy/rates narrative into equity risk appetite.",
             checkpoints=[
                 "Treasury yield and USD implications",
