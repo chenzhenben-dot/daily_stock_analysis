@@ -227,6 +227,42 @@ describe('MarketReviewReportView', () => {
     expect(screen.queryByText('Decliners')).not.toBeInTheDocument();
   });
 
+  it('hides limit up/down when the market review payload does not provide limit fields', () => {
+    const payload: MarketReviewPayload = {
+      version: 1,
+      kind: 'market_review',
+      region: 'us',
+      language: 'zh',
+      title: '美股大盘复盘',
+      breadth: {
+        upCount: 983,
+        downCount: 913,
+        flatCount: 104,
+        totalAmount: 189727840037,
+        turnoverUnit: 'USD',
+      },
+      indices: [],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    };
+
+    render(
+      <MarketReviewReportView
+        payload={payload}
+        content="# 美股大盘复盘"
+        reportLanguage="zh"
+      />,
+    );
+
+    expect(screen.getByText('上涨家数')).toBeInTheDocument();
+    expect(screen.getByText('下跌家数')).toBeInTheDocument();
+    expect(screen.queryByText('涨停/跌停')).not.toBeInTheDocument();
+    expect(screen.getByText('成交额')).toBeInTheDocument();
+  });
+
   it('formats structured market numbers to two decimal places', () => {
     const payload: MarketReviewPayload = {
       version: 1,

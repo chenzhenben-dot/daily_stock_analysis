@@ -687,13 +687,15 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                         {formatMarketCount(activeMarketData.breadth.downCount)}
                       </p>
                     </div>
-                    <div className="rounded-lg border border-subtle p-3">
-                      <p className="label-uppercase">{marketReviewText.limitUpDown}</p>
-                      <p className="mt-1 font-semibold text-foreground">
-                        {formatMarketCount(activeMarketData.breadth.limitUpCount)} /{' '}
-                        {formatMarketCount(activeMarketData.breadth.limitDownCount)}
-                      </p>
-                    </div>
+                    {activeMarketData.breadth.limitUpCount !== undefined || activeMarketData.breadth.limitDownCount !== undefined ? (
+                      <div className="rounded-lg border border-subtle p-3">
+                        <p className="label-uppercase">{marketReviewText.limitUpDown}</p>
+                        <p className="mt-1 font-semibold text-foreground">
+                          {formatMarketCount(activeMarketData.breadth.limitUpCount)} /{' '}
+                          {formatMarketCount(activeMarketData.breadth.limitDownCount)}
+                        </p>
+                      </div>
+                    ) : null}
                     <div className="rounded-lg border border-subtle p-3">
                       <p className="label-uppercase">{marketReviewText.turnover}</p>
                       <p className="mt-1 font-semibold text-foreground">

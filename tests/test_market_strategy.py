@@ -2,12 +2,17 @@
 """Tests for market strategy blueprints."""
 
 import unittest
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+for _mod in ("newspaper", "litellm", "google.generativeai", "google.genai", "anthropic", "fake_useragent"):
+    if _mod not in sys.modules:
+        sys.modules[_mod] = MagicMock()
+
 from src.core.market_profile import get_profile
 from src.core.market_strategy import get_market_strategy_blueprint
-from src.market_analyzer import MarketAnalyzer, MarketOverview
+from src.market_analyzer import MarketAnalyzer, MarketIndex, MarketOverview
 
 
 class TestMarketStrategyBlueprint(unittest.TestCase):
@@ -225,6 +230,44 @@ class TestMarketAnalyzerStrategyPrompt(unittest.TestCase):
         self.assertEqual(overview.up_count, 2)
         self.assertEqual(overview.down_count, 1)
         self.assertEqual(overview.total_amount, 6000.0)
+
+    def test_us_market_review_payload_omits_limit_up_down_fields(self):
+        analyzer = MarketAnalyzer.__new__(MarketAnalyzer)
+        analyzer.region = "us"
+        analyzer.profile = get_profile("us")
+        analyzer.config = SimpleNamespace(report_language="zh")
+        analyzer._get_output_language = MagicMock(return_value="zh")
+        analyzer._get_review_title = MagicMock(return_value="# 美股大盘复盘")
+        analyzer._get_market_scope_name = MagicMock(return_value="美股")
+        analyzer._get_turnover_unit_label = MagicMock(return_value="USD")
+        analyzer._supports_market_light = MagicMock(return_value=True)
+        overview = MarketOverview(
+            date="2026-07-22",
+            indices=[
+                MarketIndex(code="SPX", name="标普500指数", current=7500, change_pct=0.8),
+            ],
+            up_count=983,
+            down_count=913,
+            flat_count=104,
+            limit_up_count=7,
+            limit_down_count=5,
+            total_amount=189727840037.0,
+        )
+
+        payload = analyzer.build_market_review_payload(
+            overview,
+            [],
+            "## 美股大盘复盘\n\n测试",
+            market_light_snapshot={"dimensions": {"breadth": {"score": 52, "available": True}}},
+        )
+
+        self.assertIn("breadth", payload)
+        self.assertEqual(payload["breadth"]["up_count"], 983)
+        self.assertEqual(payload["breadth"]["down_count"], 913)
+        self.assertEqual(payload["breadth"]["flat_count"], 104)
+        self.assertEqual(payload["breadth"]["total_amount"], 189727840037.0)
+        self.assertNotIn("limit_up_count", payload["breadth"])
+        self.assertNotIn("limit_down_count", payload["breadth"])
 
 
 if __name__ == "__main__":

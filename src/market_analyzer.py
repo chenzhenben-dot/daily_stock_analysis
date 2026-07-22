@@ -840,17 +840,27 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             payload["market_light"] = light
 
         if has_breadth_data:
-            payload["breadth"] = {
+            breadth_payload = {
                 "up_count": overview.up_count,
                 "down_count": overview.down_count,
                 "flat_count": overview.flat_count,
-                "limit_up_count": overview.limit_up_count,
-                "limit_down_count": overview.limit_down_count,
                 "total_amount": overview.total_amount,
                 "turnover_unit": self._get_turnover_unit_label(),
             }
+            if self._supports_limit_up_down_stats():
+                breadth_payload.update(
+                    {
+                        "limit_up_count": overview.limit_up_count,
+                        "limit_down_count": overview.limit_down_count,
+                    }
+                )
+            payload["breadth"] = breadth_payload
 
         return payload
+
+    def _supports_limit_up_down_stats(self) -> bool:
+        """Whether this market has A-share style daily limit-up/down statistics."""
+        return self.region == "cn"
 
     def _supports_market_light(self) -> bool:
         return self.region in MARKET_LIGHT_REGIONS
@@ -985,6 +995,13 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             return ""
         if self._get_review_language() == "en":
             light = self.build_market_light_snapshot(overview)
+            breadth_line = (
+                f"- **Breadth**: Advancers {overview.up_count} / Decliners {overview.down_count} / "
+                f"Flat {overview.flat_count}; "
+            )
+            if self._supports_limit_up_down_stats():
+                breadth_line += f"Limit-up {overview.limit_up_count} / Limit-down {overview.limit_down_count}; "
+            breadth_line += f"Turnover {overview.total_amount:.0f} ({self._get_turnover_unit_label()})"
             return "\n".join(
                 [
                     f"- **Market Signal**: {light['score']}/100 "
@@ -992,10 +1009,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     f"- **Drivers**: {'; '.join(light['reasons'])}",
                     f"- **Guidance**: {light['guidance']}",
                     "",
-                    f"- **Breadth**: Advancers {overview.up_count} / Decliners {overview.down_count} / "
-                    f"Flat {overview.flat_count}; "
-                    f"Limit-up {overview.limit_up_count} / Limit-down {overview.limit_down_count}; "
-                    f"Turnover {overview.total_amount:.0f} ({self._get_turnover_unit_label()})",
+                    breadth_line,
                 ]
             )
         light = self.build_market_light_snapshot(overview)
@@ -1011,9 +1025,13 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "| 指标 | 数值 | 观察 |",
             "|------|------|------|",
             f"| 上涨/下跌/平盘 | {overview.up_count} / {overview.down_count} / {overview.flat_count} | 上涨占比(不含平盘) {up_ratio:.1%} |",
-            f"| 涨停/跌停 | {overview.limit_up_count} / {overview.limit_down_count} | 涨跌停差 {limit_spread:+d} |",
             f"| 两市成交额 | {overview.total_amount:.0f} 亿 | {self._describe_turnover(overview.total_amount)} |",
         ]
+        if self._supports_limit_up_down_stats():
+            lines.insert(
+                -1,
+                f"| 涨停/跌停 | {overview.limit_up_count} / {overview.limit_down_count} | 涨跌停差 {limit_spread:+d} |",
+            )
         return "\n".join(lines)
 
     def build_market_light_snapshot(self, overview: MarketOverview) -> Dict[str, Any]:
@@ -1380,11 +1398,14 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             return "\n\n".join(sections)
 
         if self.profile.has_market_stats and self.profile.has_sector_rankings:
+            liquidity_hint = "成交额、涨跌停结构、市场宽度和风险偏好"
+            if not self._supports_limit_up_down_stats():
+                liquidity_hint = "成交额、市场宽度和风险偏好"
             return """### 三、板块主线
 （区分行业板块与概念题材，分析领涨/领跌背后的逻辑、持续性和是否形成主线）
 
 ### 四、资金与情绪
-（解读成交额、涨跌停结构、市场宽度和风险偏好）
+（解读%s）
 
 ### 五、消息催化
 （结合近三日新闻，提炼真正影响明日交易的催化或扰动）
@@ -1393,7 +1414,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 （给出进攻/均衡/防守结论、仓位区间、关注方向、回避方向和一个触发失效条件）
 
 ### 七、风险提示
-（列出需要关注的风险点；最后补充“建议仅供参考，不构成投资建议”。）"""
+（列出需要关注的风险点；最后补充“建议仅供参考，不构成投资建议”。）""" % liquidity_hint
 
         numerals = ["一", "二", "三", "四", "五", "六", "七", "八"]
         section_number = 3
@@ -1407,7 +1428,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if self.profile.has_sector_rankings:
             add_section("板块主线", "（仅分析已提供的行业板块与概念题材榜单，不扩展未提供的数据）")
         if self.profile.has_market_stats:
-            add_section("资金与情绪", "（仅解读已提供的成交额、涨跌停结构、市场宽度和风险偏好数据）")
+            liquidity_hint = "（仅解读已提供的成交额、市场宽度和风险偏好数据）"
+            if self._supports_limit_up_down_stats():
+                liquidity_hint = "（仅解读已提供的成交额、涨跌停结构、市场宽度和风险偏好数据）"
+            add_section("资金与情绪", liquidity_hint)
         add_section(
             "消息催化",
             "（结合近三日新闻和指数表现，提炼真正影响明日交易的催化或扰动；不要推断未提供的资金流、市场宽度或板块榜）",
@@ -1477,10 +1501,14 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         data_limits_block = ""
         if review_language == "en":
             if self.profile.has_market_stats:
-                stats_block = f"""## Market Breadth
-- Advancers: {overview.up_count} | Decliners: {overview.down_count} | Flat: {overview.flat_count}
-- Limit-up: {overview.limit_up_count} | Limit-down: {overview.limit_down_count}
-- Turnover: {overview.total_amount:.0f} ({self._get_turnover_unit_label()})"""
+                stats_lines = [
+                    "## Market Breadth",
+                    f"- Advancers: {overview.up_count} | Decliners: {overview.down_count} | Flat: {overview.flat_count}",
+                ]
+                if self._supports_limit_up_down_stats():
+                    stats_lines.append(f"- Limit-up: {overview.limit_up_count} | Limit-down: {overview.limit_down_count}")
+                stats_lines.append(f"- Turnover: {overview.total_amount:.0f} ({self._get_turnover_unit_label()})")
+                stats_block = "\n".join(stats_lines)
 
             if self.profile.has_sector_rankings:
                 sector_block = f"""## Sector / Theme Performance
@@ -1500,10 +1528,14 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
                 data_limits_block = "## Data Limits\n" + "\n".join(data_limit_lines)
         else:
             if self.profile.has_market_stats:
-                stats_block = f"""## 市场概况
-- 上涨: {overview.up_count} 家 | 下跌: {overview.down_count} 家 | 平盘: {overview.flat_count} 家
-- 涨停: {overview.limit_up_count} 家 | 跌停: {overview.limit_down_count} 家
-- 两市成交额: {overview.total_amount:.0f} 亿元"""
+                stats_lines = [
+                    "## 市场概况",
+                    f"- 上涨: {overview.up_count} 家 | 下跌: {overview.down_count} 家 | 平盘: {overview.flat_count} 家",
+                ]
+                if self._supports_limit_up_down_stats():
+                    stats_lines.append(f"- 涨停: {overview.limit_up_count} 家 | 跌停: {overview.limit_down_count} 家")
+                stats_lines.append(f"- 两市成交额: {overview.total_amount:.0f} 亿元")
+                stats_block = "\n".join(stats_lines)
 
             if self.profile.has_sector_rankings:
                 sector_block = f"""## 板块表现
@@ -1725,15 +1757,23 @@ Output the report content directly, no extra commentary.
         if template_language == "en":
             stats_section = ""
             if self.profile.has_market_stats:
+                stats_rows = [
+                    f"| Advancers | {overview.up_count} |",
+                    f"| Decliners | {overview.down_count} |",
+                ]
+                if self._supports_limit_up_down_stats():
+                    stats_rows.extend(
+                        [
+                            f"| Limit-up | {overview.limit_up_count} |",
+                            f"| Limit-down | {overview.limit_down_count} |",
+                        ]
+                    )
+                stats_rows.append(f"| Turnover ({self._get_turnover_unit_label()}) | {overview.total_amount:.0f} |")
                 stats_section = f"""
 ### 3. Breadth & Liquidity
 | Metric | Value |
 |--------|-------|
-| Advancers | {overview.up_count} |
-| Decliners | {overview.down_count} |
-| Limit-up | {overview.limit_up_count} |
-| Limit-down | {overview.limit_down_count} |
-| Turnover ({self._get_turnover_unit_label()}) | {overview.total_amount:.0f} |
+{chr(10).join(stats_rows)}
 """
             sector_section = ""
             if self.profile.has_sector_rankings and (top_text or bottom_text or top_concept_text or bottom_concept_text):
