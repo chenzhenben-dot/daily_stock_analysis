@@ -251,6 +251,21 @@ class MarketAnalyzer:
             return "🔴" if change_pct > 0 else "🟢"
         return "🟢" if change_pct > 0 else "🔴"
 
+    @staticmethod
+    def _is_index_available(index: MarketIndex) -> bool:
+        """Return whether an index row contains a real primary or proxy quote."""
+        return not index.data_unavailable
+
+    @staticmethod
+    def _index_unavailable_text(language: str) -> str:
+        return "Data unavailable" if language == "en" else "数据暂不可用"
+
+    def _format_index_summary_line(self, index: MarketIndex, language: str) -> str:
+        if not self._is_index_available(index):
+            return f"- {index.name}: {self._index_unavailable_text(language)}\n"
+        direction = "↑" if index.change_pct > 0 else "↓" if index.change_pct < 0 else "-"
+        return f"- {index.name}: {index.current:.2f} ({direction}{abs(index.change_pct):.2f}%)\n"
+
     def _get_review_title(self, date: str) -> str:
         if self._get_review_language() == "en":
             market_names = {
@@ -1159,7 +1174,11 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 reasons.append(f"上涨家数占比 {up_ratio:.0%}，亏钱效应较强")
             else:
                 reasons.append(f"上涨家数占比 {up_ratio:.0%}，市场分化")
-        index_changes = [idx.change_pct for idx in overview.indices if idx.change_pct is not None]
+        index_changes = [
+            idx.change_pct
+            for idx in overview.indices
+            if self._is_index_available(idx) and idx.change_pct is not None
+        ]
         if index_changes:
             avg_change = sum(index_changes) / len(index_changes)
             reasons.append(f"主要指数平均涨跌幅 {avg_change:+.2f}%")
@@ -1182,7 +1201,11 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 reasons.append(f"advancers ratio {up_ratio:.0%}, downside pressure dominates")
             else:
                 reasons.append(f"advancers ratio {up_ratio:.0%}, breadth is mixed")
-        index_changes = [idx.change_pct for idx in overview.indices if idx.change_pct is not None]
+        index_changes = [
+            idx.change_pct
+            for idx in overview.indices
+            if self._is_index_available(idx) and idx.change_pct is not None
+        ]
         if index_changes:
             avg_change = sum(index_changes) / len(index_changes)
             reasons.append(f"average major-index change {avg_change:+.2f}%")
@@ -1209,6 +1232,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "|------|------|--------|------|------|------|------|-----------|",
             ]
         for idx in overview.indices:
+            if not self._is_index_available(idx):
+                unavailable = self._index_unavailable_text(self._get_review_language())
+                lines.append(f"| {idx.name} | {unavailable} | - | - | - | - | - | - |")
+                continue
             arrow = self._get_index_change_arrow(idx.change_pct)
             amount_raw = idx.amount or 0.0
             amount_str = self._format_turnover_value(amount_raw)
@@ -1372,8 +1399,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if breadth_available:
             breadth_score = int(overview.up_count / participants * 100)
 
-        index_changes = [idx.change_pct for idx in overview.indices if idx.change_pct is not None]
-        index_available = bool(overview.indices and index_changes)
+        index_changes = [
+            idx.change_pct
+            for idx in overview.indices
+            if self._is_index_available(idx) and idx.change_pct is not None
+        ]
+        index_available = bool(index_changes)
         index_score = 50
         if index_available:
             avg_change = sum(index_changes) / len(index_changes)
@@ -1555,8 +1586,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         # 指数行情信息（简洁格式，不用emoji）
         indices_text = ""
         for idx in overview.indices:
-            direction = "↑" if idx.change_pct > 0 else "↓" if idx.change_pct < 0 else "-"
-            indices_text += f"- {idx.name}: {idx.current:.2f} ({direction}{abs(idx.change_pct):.2f}%)\n"
+            indices_text += self._format_index_summary_line(idx, review_language)
         
         # 板块信息
         top_sectors_text = self._format_ranking_summary(overview.top_sectors)
@@ -1842,7 +1872,8 @@ Output the report content directly, no extra commentary.
             (
                 idx
                 for idx in overview.indices
-                if idx.code == mood_code or idx.code.endswith(mood_code)
+                if self._is_index_available(idx)
+                and (idx.code == mood_code or idx.code.endswith(mood_code))
             ),
             None,
         )
@@ -1861,8 +1892,8 @@ Output the report content directly, no extra commentary.
         # 指数行情（简洁格式）
         indices_text = ""
         for idx in overview.indices[:4]:
-            direction = "↑" if idx.change_pct > 0 else "↓" if idx.change_pct < 0 else "-"
-            indices_text += f"- **{idx.name}**: {idx.current:.2f} ({direction}{abs(idx.change_pct):.2f}%)\n"
+            line = self._format_index_summary_line(idx, template_language)
+            indices_text += line.replace("- ", "- **", 1).replace(":", "**:", 1)
         
         # 板块信息
         separator = ", " if template_language == "en" else "、"
@@ -2098,7 +2129,10 @@ if __name__ == "__main__":
     print(f"日期: {overview.date}")
     print(f"指数数量: {len(overview.indices)}")
     for idx in overview.indices:
-        print(f"  {idx.name}: {idx.current:.2f} ({idx.change_pct:+.2f}%)")
+        if idx.data_unavailable:
+            print(f"  {idx.name}: 数据暂不可用")
+        else:
+            print(f"  {idx.name}: {idx.current:.2f} ({idx.change_pct:+.2f}%)")
     print(f"上涨: {overview.up_count} | 下跌: {overview.down_count}")
     print(f"成交额: {overview.total_amount:.0f}亿")
     

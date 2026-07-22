@@ -387,6 +387,82 @@ describe('MarketReviewReportView', () => {
     expect(screen.queryByText('涨停/跌停')).not.toBeInTheDocument();
   });
 
+  it('renders an unavailable NDX100 row without showing zero as a real index value', () => {
+    const payload: MarketReviewPayload = {
+      version: 1,
+      kind: 'market_review',
+      region: 'us',
+      language: 'zh',
+      title: '美股大盘复盘',
+      indices: [{
+        code: 'NDX100',
+        name: '纳斯达克100指数',
+        current: 0,
+        changePct: 0,
+        high: 0,
+        low: 0,
+        dataUnavailable: true,
+        source: 'unavailable',
+      }],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    };
+
+    render(
+      <MarketReviewReportView
+        payload={payload}
+        content="# 美股大盘复盘"
+        reportLanguage="zh"
+      />,
+    );
+
+    expect(screen.getByText('数据暂不可用')).toBeInTheDocument();
+    expect(screen.queryByText('0.00')).not.toBeInTheDocument();
+    expect(screen.queryByText('0.00%')).not.toBeInTheDocument();
+  });
+
+  it('labels QQQ-backed NDX100 values as an ETF proxy', () => {
+    const payload: MarketReviewPayload = {
+      version: 1,
+      kind: 'market_review',
+      region: 'us',
+      language: 'en',
+      title: 'US Market Review',
+      indices: [{
+        code: 'NDX100',
+        name: 'Nasdaq 100',
+        current: 500,
+        changePct: 1.1,
+        proxy: true,
+        source: 'nasdaq100_qqq_etf_proxy',
+      }],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    };
+
+    render(
+      <MarketReviewReportView
+        payload={payload}
+        content="# US Market Review"
+        reportLanguage="en"
+      />,
+    );
+
+    const proxyLabel = screen.getByText('QQQ ETF Proxy');
+    expect(proxyLabel).toBeInTheDocument();
+    expect(proxyLabel).toHaveAttribute(
+      'title',
+      'Value is from QQQ, an ETF tracking the Nasdaq-100, not the official index level.',
+    );
+    expect(screen.getByText('500.00')).toBeInTheDocument();
+  });
+
   it('renders unknown market_stats_source as 未标注 / Unknown (no raw id leak)', () => {
     const payload: MarketReviewPayload = {
       version: 1,

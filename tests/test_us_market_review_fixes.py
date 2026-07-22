@@ -376,6 +376,69 @@ class TestUsMarketIndicesCoverage(unittest.TestCase):
         self.assertEqual(ndx100_yf, "^NDX")
         self.assertEqual(ndx100_name, "纳斯达克100指数")
 
+    def test_unavailable_index_is_excluded_from_market_light_score(self):
+        """Unavailable placeholders must not be treated as flat index observations."""
+        analyzer = _make_us_analyzer()
+        overview = _us_overview()
+        overview.indices = [
+            MarketIndex(code="SPX", name="标普500指数", current=6200.0, change_pct=2.0),
+            MarketIndex(
+                code="NDX100",
+                name="纳斯达克100指数",
+                current=0.0,
+                change_pct=0.0,
+                data_unavailable=True,
+                source="unavailable",
+            ),
+        ]
+
+        snapshot = analyzer.build_market_light_snapshot(overview)
+
+        self.assertEqual(snapshot["dimensions"]["index"]["score"], 74)
+
+    def test_unavailable_index_is_rendered_as_na_in_prompt_and_tables(self):
+        analyzer = _make_us_analyzer()
+        overview = _us_overview()
+        overview.indices = [
+            MarketIndex(
+                code="NDX100",
+                name="纳斯达克100指数",
+                current=0.0,
+                change_pct=0.0,
+                data_unavailable=True,
+                source="unavailable",
+            ),
+        ]
+
+        prompt = analyzer._build_review_prompt(overview, [])
+        table = analyzer._build_indices_block(overview)
+        fallback = analyzer._generate_template_review(overview, [])
+
+        for rendered in (prompt, table, fallback):
+            self.assertIn("数据暂不可用", rendered)
+            self.assertNotIn("纳斯达克100指数: 0.00", rendered)
+            self.assertNotIn("| 纳斯达克100指数 | 0.00 |", rendered)
+
+    def test_index_payload_preserves_proxy_and_unavailable_metadata(self):
+        proxy = MarketIndex(
+            code="NDX100",
+            name="纳斯达克100指数 (QQQ ETF 代理)",
+            current=500.0,
+            change_pct=1.0,
+            proxy=True,
+            source="nasdaq100_qqq_etf_proxy",
+        ).to_dict()
+        unavailable = MarketIndex(
+            code="NDX100",
+            name="纳斯达克100指数",
+            data_unavailable=True,
+            source="unavailable",
+        ).to_dict()
+
+        self.assertTrue(proxy["proxy"])
+        self.assertEqual(proxy["source"], "nasdaq100_qqq_etf_proxy")
+        self.assertTrue(unavailable["data_unavailable"])
+
 
 class TestUsBlueprintAndPrompt(unittest.TestCase):
     """需求 #5: US prompt 蓝图/章节标题改成 Breadth & Liquidity / Macro & Risk Appetite。"""

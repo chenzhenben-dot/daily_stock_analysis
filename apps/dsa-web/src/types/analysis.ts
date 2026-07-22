@@ -256,6 +256,9 @@ export interface MarketReviewIndex {
   volume?: number;
   amount?: number;
   amplitude?: number;
+  proxy?: boolean;
+  dataUnavailable?: boolean;
+  source?: string;
 }
 
 export interface MarketReviewBreadth {

@@ -388,6 +388,9 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
   macroChange: string;
   asOf: string;
   source: string;
+  dataUnavailable: string;
+  qqqProxy: string;
+  qqqProxyTooltip: string;
 }> = {
   zh: {
     reviewSummary: '复盘摘要',
@@ -417,6 +420,9 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     macroChange: '较前值',
     asOf: '数据日期',
     source: '来源',
+    dataUnavailable: '数据暂不可用',
+    qqqProxy: 'QQQ ETF 代理',
+    qqqProxyTooltip: '该数值来自追踪纳斯达克100的 QQQ ETF，并非官方指数点位。',
   },
   en: {
     reviewSummary: 'Review Summary',
@@ -446,6 +452,9 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     macroChange: 'Change',
     asOf: 'As of',
     source: 'Source',
+    dataUnavailable: 'Data unavailable',
+    qqqProxy: 'QQQ ETF Proxy',
+    qqqProxyTooltip: 'Value is from QQQ, an ETF tracking the Nasdaq-100, not the official index level.',
   },
   ko: {
     reviewSummary: '리뷰 요약',
@@ -475,6 +484,9 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     macroChange: '이전 대비',
     asOf: '기준일',
     source: '출처',
+    dataUnavailable: '데이터 없음',
+    qqqProxy: 'QQQ ETF 대체 데이터',
+    qqqProxyTooltip: '이 값은 공식 지수 값이 아니라 나스닥 100을 추종하는 QQQ ETF에서 가져왔습니다.',
   },
 };
 
@@ -842,14 +854,35 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-subtle">
-                        {activeMarketData.indices.map((index) => (
-                          <tr key={index.code || index.name}>
-                            <td className="px-2 py-2 font-medium text-foreground">{index.name}</td>
-                            <td className="px-2 py-2 text-secondary-text">{formatMarketNumber(index.current)}</td>
-                            <td className="px-2 py-2 text-secondary-text">{formatMarketPercent(index.changePct)}</td>
-                            <td className="px-2 py-2 text-secondary-text">{formatMarketHighLow(index.high, index.low)}</td>
-                          </tr>
-                        ))}
+                        {activeMarketData.indices.map((index) => {
+                          const unavailable = index.dataUnavailable === true;
+                          return (
+                            <tr key={index.code || index.name}>
+                              <td className="px-2 py-2 font-medium text-foreground">
+                                <span className="inline-flex flex-wrap items-center gap-2">
+                                  <span>{index.name}</span>
+                                  {index.proxy ? (
+                                    <span
+                                      className="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
+                                      title={marketReviewText.qqqProxyTooltip}
+                                    >
+                                      {marketReviewText.qqqProxy}
+                                    </span>
+                                  ) : null}
+                                </span>
+                              </td>
+                              <td className="px-2 py-2 text-secondary-text">
+                                {unavailable ? marketReviewText.dataUnavailable : formatMarketNumber(index.current)}
+                              </td>
+                              <td className="px-2 py-2 text-secondary-text">
+                                {unavailable ? '-' : formatMarketPercent(index.changePct)}
+                              </td>
+                              <td className="px-2 py-2 text-secondary-text">
+                                {unavailable ? '-' : formatMarketHighLow(index.high, index.low)}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
