@@ -201,6 +201,37 @@ class TelegramSender:
     ) -> bool:
         """Retry Telegram send without parse_mode when Markdown parsing fails."""
         logger.info("Telegram Markdown 解析失败，尝试使用纯文本格式重新发送...")
+        max_length = 4096
+        plain_chunks = self._split_plain_text(text, max_length)
+        if len(plain_chunks) > 1:
+            all_success = True
+            for chunk_index, chunk_text in enumerate(plain_chunks, start=1):
+                logger.info("发送 Telegram 纯文本回退消息块 %d/%d...", chunk_index, len(plain_chunks))
+                if not self._send_plain_text_once(
+                    api_url,
+                    payload,
+                    chunk_text,
+                    timeout_seconds=timeout_seconds,
+                ):
+                    all_success = False
+            return all_success
+
+        return self._send_plain_text_once(
+            api_url,
+            payload,
+            plain_chunks[0] if plain_chunks else "",
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _send_plain_text_once(
+        self,
+        api_url: str,
+        payload: dict,
+        text: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+    ) -> bool:
+        """Send one plain-text Telegram message without parse_mode."""
         plain_payload = dict(payload)
         plain_payload.pop('parse_mode', None)
         plain_payload['text'] = text
@@ -230,6 +261,33 @@ class TelegramSender:
         logger.error(f"Telegram 纯文本回退失败: HTTP {response.status_code}")
         logger.error(f"响应内容: {response.text}")
         return False
+
+    def _split_plain_text(self, text: str, max_length: int) -> list[str]:
+        """Split plain text so every Telegram fallback payload fits."""
+        if not text:
+            return [""]
+
+        chunks = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= max_length:
+                chunks.append(remaining)
+                break
+
+            safe_cut = max_length
+            newline_cut = remaining.rfind("\n", 0, safe_cut + 1)
+            space_cut = remaining.rfind(" ", 0, safe_cut + 1)
+            natural_cut = max(newline_cut, space_cut)
+            if natural_cut >= max(1, safe_cut // 2):
+                safe_cut = natural_cut + 1
+
+            chunk = remaining[:safe_cut].rstrip()
+            if not chunk:
+                chunk = remaining[:safe_cut]
+            chunks.append(chunk)
+            remaining = remaining[safe_cut:].lstrip()
+
+        return chunks
 
     def _split_telegram_text(self, text: str, max_length: int) -> list[str]:
         """Split one section so every rendered Telegram payload fits."""

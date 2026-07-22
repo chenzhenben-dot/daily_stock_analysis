@@ -1477,6 +1477,32 @@ class TestTelegramSender(unittest.TestCase):
         self.assertEqual(second_payload["text"], content)
 
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
+    def test_long_plain_text_fallback_is_chunked(self, mock_post):
+        markdown_error = _response(400)
+        markdown_error.text = (
+            '{"ok":false,"error_code":400,"description":"Bad Request: can\'t parse entities"}'
+        )
+        plain_text_success = _response(200, {"ok": True})
+        mock_post.side_effect = [markdown_error, plain_text_success, plain_text_success]
+
+        cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
+        sender = TelegramSender(cfg)
+        content = "*unclosed markdown\n" + ("大盘复盘通知内容\n" * 700)
+
+        result = sender._send_telegram_message(
+            "https://api.telegram.org/botBOT/sendMessage",
+            "CHAT",
+            content,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(mock_post.call_count, 3)
+        fallback_payloads = [call.kwargs["json"] for call in mock_post.call_args_list[1:]]
+        self.assertTrue(all("parse_mode" not in payload for payload in fallback_payloads))
+        self.assertTrue(all(len(payload["text"]) <= 4096 for payload in fallback_payloads))
+        self.assertEqual("".join(payload["text"] for payload in fallback_payloads).replace("\n", ""), content.replace("\n", ""))
+
+    @mock.patch("src.notification_sender.telegram_sender.requests.post")
     def test_send_uses_legacy_telegram_report_formatter(self, mock_post):
         mock_post.return_value = _response(200, {"ok": True})
         cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
