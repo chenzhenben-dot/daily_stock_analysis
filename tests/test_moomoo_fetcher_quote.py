@@ -60,22 +60,24 @@ class _MarketStatsContext:
             }
         )
         if plate_code == "US.NYSE":
-            return RET_OK, {
-                "last_page": True,
-                "stock_list": [
+            return RET_OK, (
+                True,
+                2,
+                [
                     {"stock_code": "US.AAA"},
                     {"stock_code": "US.BBB"},
                 ],
-            }
+            )
         if plate_code == "US.NASDAQ":
-            return RET_OK, {
-                "last_page": True,
-                "stock_list": [
+            return RET_OK, (
+                True,
+                2,
+                [
                     {"code": "US.CCC"},
                     {"code": "US.AAA"},
                 ],
-            }
-        return RET_OK, {"last_page": True, "stock_list": []}
+            )
+        return RET_OK, (True, 0, [])
 
     def get_market_snapshot(self, codes):
         self.snapshot_calls.append(list(codes))

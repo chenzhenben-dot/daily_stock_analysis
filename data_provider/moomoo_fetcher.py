@@ -633,6 +633,8 @@ class MoomooFetcher(BaseFetcher):
 
     @staticmethod
     def _extract_stock_filter_list(data: Any) -> List[Any]:
+        if isinstance(data, tuple) and len(data) >= 3:
+            return list(data[2] or [])
         if isinstance(data, dict):
             stock_list = data.get("stock_list") or data.get("stockList")
             return list(stock_list or [])
@@ -663,6 +665,8 @@ class MoomooFetcher(BaseFetcher):
 
     @staticmethod
     def _is_stock_filter_last_page(data: Any) -> bool:
+        if isinstance(data, tuple) and len(data) >= 1:
+            return bool(data[0])
         if isinstance(data, dict):
             return bool(data.get("last_page") or data.get("lastPage"))
         if hasattr(data, "get"):
