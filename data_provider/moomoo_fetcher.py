@@ -102,6 +102,9 @@ _HK_INDEX_FUTU_CODES = {
     "HSCEI": "HK.HSCEI",
 }
 
+_US_EXCHANGE_PLATES = ("US.NYSE", "US.NASDAQ", "US.AMEX")
+_MOOMOO_SNAPSHOT_BATCH_SIZE = 400
+
 
 class MoomooFetcher(BaseFetcher):
     """
@@ -570,6 +573,16 @@ class MoomooFetcher(BaseFetcher):
         if self._disabled_reason is not None:
             return None
         ctx = self._ensure_ctx()
+        universe_codes = self._get_us_exchange_universe_codes(ctx)
+        if universe_codes:
+            stats = self._aggregate_snapshot_market_stats(
+                ctx,
+                universe_codes,
+                source="moomoo_us_exchange_universe",
+            )
+            if stats:
+                return stats
+
         # Sample well-known US large-caps; cheap call, gives a coarse sense of
         # market breadth for the dashboard. get_market_snapshot returns 142
         # fields per code in a single request.
@@ -579,43 +592,150 @@ class MoomooFetcher(BaseFetcher):
             "US.JPM", "US.V", "US.MA", "US.UNH", "US.XOM",
             "US.WMT", "US.JNJ", "US.PG", "US.HD", "US.LLY",
         ]
-        try:
-            ret, data = ctx.get_market_snapshot(proxy_codes)
-        except Exception as exc:
-            logger.warning("[Moomoo] market_stats snapshot error: %s", exc)
-            return None
-        if ret != RET_OK or data is None or isinstance(data, str):
-            logger.debug(
-                "[Moomoo] market_stats empty (ret=%s data=%s)",
-                ret,
-                str(data)[:60],
+        return self._aggregate_snapshot_market_stats(
+            ctx,
+            proxy_codes,
+            source="moomoo_large_cap_sample",
+        )
+
+    def _get_us_exchange_universe_codes(self, ctx: Any) -> List[str]:
+        if not hasattr(ctx, "get_stock_filter"):
+            return []
+        market = getattr(Market, "US", "US") if Market is not None else "US"
+        seen: set[str] = set()
+        codes: List[str] = []
+        for plate_code in _US_EXCHANGE_PLATES:
+            begin = 0
+            while True:
+                try:
+                    ret, data = ctx.get_stock_filter(
+                        market,
+                        [],
+                        plate_code=plate_code,
+                        begin=begin,
+                        num=200,
+                    )
+                except Exception as exc:
+                    logger.debug("[Moomoo] stock_filter(%s) error: %s", plate_code, exc)
+                    break
+                if ret != RET_OK or not data:
+                    break
+                stock_list = self._extract_stock_filter_list(data)
+                for item in stock_list:
+                    code = self._extract_stock_filter_code(item)
+                    if code and code.startswith("US.") and code not in seen:
+                        seen.add(code)
+                        codes.append(code)
+                if self._is_stock_filter_last_page(data) or not stock_list:
+                    break
+                begin += len(stock_list)
+        return codes
+
+    @staticmethod
+    def _extract_stock_filter_list(data: Any) -> List[Any]:
+        if isinstance(data, dict):
+            stock_list = data.get("stock_list") or data.get("stockList")
+            return list(stock_list or [])
+        if hasattr(data, "get"):
+            try:
+                stock_list = data.get("stock_list") or data.get("stockList")
+                return list(stock_list or [])
+            except Exception:
+                return []
+        return list(getattr(data, "stock_list", []) or getattr(data, "stockList", []) or [])
+
+    @staticmethod
+    def _extract_stock_filter_code(item: Any) -> Optional[str]:
+        if isinstance(item, dict):
+            raw = item.get("stock_code") or item.get("code") or item.get("symbol")
+        else:
+            raw = (
+                getattr(item, "stock_code", None)
+                or getattr(item, "code", None)
+                or getattr(item, "symbol", None)
             )
+        if raw is None:
             return None
-        if hasattr(data, "empty") and data.empty:
+        code = str(raw).strip().upper()
+        if not code:
             return None
-        up = down = flat = 0
-        total_amount = 0.0
-        for _, row in data.iterrows():
-            chg = safe_float(row.get("change_rate")) or 0.0
-            if chg > 0:
-                up += 1
-            elif chg < 0:
-                down += 1
-            else:
-                flat += 1
-            turnover = safe_float(row.get("turnover"))
-            if turnover:
-                total_amount += turnover
-        return {
-            "up_count": up,
-            "down_count": down,
-            "flat_count": flat,
-            "limit_up_count": 0,
-            "limit_down_count": 0,
-            "total_amount": total_amount,
-            "source": "moomoo",
-            "sample_size": len(data),
-        }
+        return code if code.startswith("US.") else f"US.{code}"
+
+    @staticmethod
+    def _is_stock_filter_last_page(data: Any) -> bool:
+        if isinstance(data, dict):
+            return bool(data.get("last_page") or data.get("lastPage"))
+        if hasattr(data, "get"):
+            try:
+                return bool(data.get("last_page") or data.get("lastPage"))
+            except Exception:
+                return True
+        return bool(getattr(data, "last_page", True) or getattr(data, "lastPage", True))
+
+    def _aggregate_snapshot_market_stats(
+        self,
+        ctx: Any,
+        codes: List[str],
+        *,
+        source: str,
+    ) -> Optional[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for start in range(0, len(codes), _MOOMOO_SNAPSHOT_BATCH_SIZE):
+            batch = codes[start:start + _MOOMOO_SNAPSHOT_BATCH_SIZE]
+            if not batch:
+                continue
+            try:
+                ret, data = ctx.get_market_snapshot(batch)
+            except Exception as exc:
+                logger.warning("[Moomoo] market_stats snapshot error: %s", exc)
+                continue
+            if ret != RET_OK or data is None or isinstance(data, str):
+                logger.debug(
+                    "[Moomoo] market_stats empty (ret=%s data=%s)",
+                    ret,
+                    str(data)[:60],
+                )
+                continue
+            if hasattr(data, "empty") and data.empty:
+                continue
+            if hasattr(data, "iterrows"):
+                rows.extend(row.to_dict() for _, row in data.iterrows())
+            elif isinstance(data, list):
+                rows.extend(item for item in data if isinstance(item, dict))
+        if not rows:
+            return None
+        try:
+            up = down = flat = 0
+            total_amount = 0.0
+            for row in rows:
+                last_price = safe_float(row.get("last_price"))
+                prev_close = safe_float(row.get("prev_close_price"))
+                chg = safe_float(row.get("change_rate"))
+                if chg is None and last_price is not None and prev_close:
+                    chg = ((last_price - prev_close) / prev_close) * 100
+                chg = chg or 0.0
+                if chg > 0:
+                    up += 1
+                elif chg < 0:
+                    down += 1
+                else:
+                    flat += 1
+                turnover = safe_float(row.get("turnover"))
+                if turnover:
+                    total_amount += turnover
+            return {
+                "up_count": up,
+                "down_count": down,
+                "flat_count": flat,
+                "limit_up_count": 0,
+                "limit_down_count": 0,
+                "total_amount": total_amount,
+                "source": source,
+                "sample_size": len(rows),
+            }
+        except Exception as exc:
+            logger.warning("[Moomoo] aggregate market_stats failed: %s", exc)
+            return None
 
     # --- Convenience accessors used elsewhere in DSA ---
 

@@ -21,7 +21,7 @@ class MarketProfile:
     news_queries: List[str]
     # 指数点评 Prompt 提示语
     prompt_index_hint: str
-    # 市场概况是否包含涨跌家数、涨停跌停（A 股有，美股无）
+    # 市场概况是否包含涨跌家数、成交额等宽度统计
     has_market_stats: bool
     # 市场概况是否包含板块涨跌
     has_sector_rankings: bool
@@ -49,7 +49,7 @@ US_PROFILE = MarketProfile(
         "S&P 500 NASDAQ",
     ],
     prompt_index_hint="分析标普500、纳斯达克、道指等各指数走势特点",
-    has_market_stats=False,
+    has_market_stats=True,
     has_sector_rankings=True,
 )
 

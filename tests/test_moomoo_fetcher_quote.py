@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import sys
+from unittest.mock import MagicMock
 
 import pandas as pd
+
+if 'fake_useragent' not in sys.modules:
+    sys.modules['fake_useragent'] = MagicMock()
 
 from data_provider.moomoo_fetcher import MoomooFetcher, RET_OK
 from data_provider.realtime_types import RealtimeSource
@@ -39,6 +44,53 @@ class _SnapshotContext:
         raise AssertionError("get_stock_quote requires a prior subscription")
 
 
+class _MarketStatsContext:
+    def __init__(self) -> None:
+        self.filter_calls = []
+        self.snapshot_calls = []
+
+    def get_stock_filter(self, market, filter_list, plate_code=None, begin=0, num=200):
+        self.filter_calls.append(
+            {
+                "market": market,
+                "filter_list": filter_list,
+                "plate_code": plate_code,
+                "begin": begin,
+                "num": num,
+            }
+        )
+        if plate_code == "US.NYSE":
+            return RET_OK, {
+                "last_page": True,
+                "stock_list": [
+                    {"stock_code": "US.AAA"},
+                    {"stock_code": "US.BBB"},
+                ],
+            }
+        if plate_code == "US.NASDAQ":
+            return RET_OK, {
+                "last_page": True,
+                "stock_list": [
+                    {"code": "US.CCC"},
+                    {"code": "US.AAA"},
+                ],
+            }
+        return RET_OK, {"last_page": True, "stock_list": []}
+
+    def get_market_snapshot(self, codes):
+        self.snapshot_calls.append(list(codes))
+        rows = []
+        data = {
+            "US.AAA": {"last_price": 11.0, "prev_close_price": 10.0, "turnover": 1000.0},
+            "US.BBB": {"last_price": 9.0, "prev_close_price": 10.0, "turnover": 2000.0},
+            "US.CCC": {"last_price": 10.1, "prev_close_price": 10.0, "turnover": 3000.0},
+        }
+        for code in codes:
+            if code in data:
+                rows.append({"code": code, **data[code]})
+        return RET_OK, pd.DataFrame(rows)
+
+
 class MoomooRealtimeQuoteTest(unittest.TestCase):
     def test_realtime_quote_uses_snapshot_without_subscription(self) -> None:
         context = _SnapshotContext()
@@ -62,6 +114,30 @@ class MoomooRealtimeQuoteTest(unittest.TestCase):
         self.assertIsInstance(quote.volume, int)
         self.assertEqual(15_542_000_000, quote.total_mv)
         self.assertEqual(10_122_190_701, quote.circ_mv)
+
+
+class MoomooMarketStatsTest(unittest.TestCase):
+    def test_market_stats_aggregates_us_exchange_universe_snapshots(self) -> None:
+        context = _MarketStatsContext()
+        fetcher = MoomooFetcher.__new__(MoomooFetcher)
+        fetcher._disabled_reason = None
+        fetcher._ctx = context
+        fetcher._ensure_ctx = lambda: context
+
+        stats = fetcher.get_market_stats()
+
+        self.assertIsNotNone(stats)
+        self.assertEqual(2, stats["up_count"])
+        self.assertEqual(1, stats["down_count"])
+        self.assertEqual(0, stats["flat_count"])
+        self.assertEqual(6000.0, stats["total_amount"])
+        self.assertEqual(3, stats["sample_size"])
+        self.assertEqual("moomoo_us_exchange_universe", stats["source"])
+        self.assertEqual(["US.AAA", "US.BBB", "US.CCC"], context.snapshot_calls[0])
+        self.assertEqual(
+            ["US.NYSE", "US.NASDAQ", "US.AMEX"],
+            [call["plate_code"] for call in context.filter_calls],
+        )
 
 
 if __name__ == "__main__":

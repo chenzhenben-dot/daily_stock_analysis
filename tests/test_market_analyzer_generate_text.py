@@ -3278,18 +3278,18 @@ Sector text.
         assert snapshot["dimensions"]["limit"] == {"score": 50, "available": False}
 
     def test_market_review_payload_omits_breadth_for_markets_without_stats(self):
-        from src.core.market_profile import US_PROFILE
+        from src.core.market_profile import HK_PROFILE
         from src.market_analyzer import MarketIndex, MarketOverview
 
         ma = self._make_market_analyzer_with_mock_generate_text(return_value="复盘结果")
-        ma.region = "us"
-        ma.profile = US_PROFILE
+        ma.region = "hk"
+        ma.profile = HK_PROFILE
 
         payload = ma.build_market_review_payload(
             MarketOverview(
                 date="2026-03-18",
                 indices=[
-                    MarketIndex(code="SPX", name="S&P 500", current=5200.0, change_pct=0.6),
+                    MarketIndex(code="HSI", name="恒生指数", current=18000.0, change_pct=0.6),
                 ],
                 up_count=1000,
                 down_count=400,
@@ -3303,7 +3303,7 @@ Sector text.
         )
 
         assert "breadth" not in payload
-        assert payload["indices"][0]["code"] == "SPX"
+        assert payload["indices"][0]["code"] == "HSI"
 
     def test_market_review_payload_omits_breadth_for_cn_market_without_available_stats(self):
         from src.market_analyzer import MarketIndex, MarketOverview

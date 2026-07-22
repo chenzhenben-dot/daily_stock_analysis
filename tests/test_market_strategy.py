@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from src.core.market_profile import get_profile
 from src.core.market_strategy import get_market_strategy_blueprint
 from src.market_analyzer import MarketAnalyzer, MarketOverview
 
@@ -197,6 +198,33 @@ class TestMarketAnalyzerStrategyPrompt(unittest.TestCase):
             purpose="market_review:hk"
         )
         self.assertEqual(overview.up_count, 3)
+
+    def test_us_market_overview_fetches_market_stats(self):
+        analyzer = MarketAnalyzer.__new__(MarketAnalyzer)
+        analyzer.region = "us"
+        analyzer.profile = get_profile("us")
+        analyzer.data_manager = MagicMock()
+        analyzer._fred_macro_adapter = MagicMock()
+        analyzer._get_main_indices = MagicMock(return_value=[])
+        analyzer._get_sector_rankings = MagicMock()
+        analyzer._get_macro_indicators = MagicMock()
+        analyzer.data_manager.get_market_stats.return_value = {
+            "up_count": 2,
+            "down_count": 1,
+            "flat_count": 0,
+            "limit_up_count": 0,
+            "limit_down_count": 0,
+            "total_amount": 6000.0,
+        }
+
+        overview = analyzer.get_market_overview()
+
+        analyzer.data_manager.get_market_stats.assert_called_once_with(
+            purpose="market_review:us"
+        )
+        self.assertEqual(overview.up_count, 2)
+        self.assertEqual(overview.down_count, 1)
+        self.assertEqual(overview.total_amount, 6000.0)
 
 
 if __name__ == "__main__":
