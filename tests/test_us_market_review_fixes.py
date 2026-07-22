@@ -183,6 +183,34 @@ class TestUsTurnoverUnitFormatting(unittest.TestCase):
         self.assertNotIn("两市成交额", prompt)
         self.assertNotIn("亿元", prompt)
 
+    def test_us_injected_stats_block_uses_sample_turnover_and_source(self):
+        """最终报告注入块也必须使用 US 单位，不能只修 LLM prompt。"""
+        analyzer = _make_us_analyzer()
+        overview = _us_overview()
+        overview.market_stats_source = "moomoo_us_exchange_universe"
+        overview.market_stats_sample_size = 2000
+
+        block = analyzer._build_stats_block(overview)
+
+        self.assertIn("样本成交额", block)
+        self.assertIn("189.73 十亿美元", block)
+        self.assertIn("moomoo_us_exchange_universe", block)
+        self.assertIn("2,000", block)
+        self.assertNotIn("两市成交额", block)
+        self.assertNotIn("189727840037 亿", block)
+
+    def test_us_fallback_report_does_not_reintroduce_cn_turnover_terms(self):
+        analyzer = _make_us_analyzer()
+        overview = _us_overview()
+
+        report = analyzer._generate_template_review(overview, [])
+
+        self.assertIn("189.73 十亿美元", report)
+        self.assertIn("成交额(十亿美元)", report)
+        self.assertNotIn("两市成交额", report)
+        self.assertNotIn("189727840037 亿", report)
+        self.assertNotIn("成交额(亿)", report)
+
 
 class TestUsDescribeTurnover(unittest.TestCase):
     """需求 #2: 成交活跃度按 region 分发，US/HK/JP/KR 用中性文案。"""

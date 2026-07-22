@@ -1099,13 +1099,21 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "| 指标 | 数值 | 观察 |",
             "|------|------|------|",
             f"| 上涨/下跌/平盘 | {overview.up_count} / {overview.down_count} / {overview.flat_count} | 上涨占比(不含平盘) {up_ratio:.1%} |",
-            f"| 两市成交额 | {overview.total_amount:.0f} 亿 | {self._describe_turnover(overview.total_amount)} |",
         ]
         if self._supports_limit_up_down_stats():
-            lines.insert(
-                -1,
+            lines.append(
                 f"| 涨停/跌停 | {overview.limit_up_count} / {overview.limit_down_count} | 涨跌停差 {limit_spread:+d} |",
             )
+        turnover_label = "两市成交额" if self.region == "cn" else "样本成交额"
+        turnover_unit = "亿元" if self.region == "cn" else self._get_turnover_unit_label()
+        lines.append(
+            f"| {turnover_label} | {self._format_turnover_value(overview.total_amount)} {turnover_unit} | "
+            f"{self._describe_turnover(overview.total_amount)} |"
+        )
+        if self.region != "cn":
+            source_note = self._build_market_stats_source_note(overview)
+            if source_note:
+                lines.append(f"| 数据来源与覆盖 | {source_note} | 非全市场完整统计 |")
         return "\n".join(lines)
 
     def build_market_light_snapshot(self, overview: MarketOverview) -> Dict[str, Any]:
@@ -1227,8 +1235,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "|-------|------|----------|------|------|-----|-----------|-----------------|",
             ]
         else:
+            turnover_unit = self._get_turnover_unit_label()
             lines = [
-                "| 指数 | 最新 | 涨跌幅 | 开盘 | 最高 | 最低 | 振幅 | 成交额(亿) |",
+                f"| 指数 | 最新 | 涨跌幅 | 开盘 | 最高 | 最低 | 振幅 | 成交额({turnover_unit}) |",
                 "|------|------|--------|------|------|------|------|-----------|",
             ]
         for idx in overview.indices:
