@@ -201,7 +201,7 @@ class MarketAnalyzer:
     def _get_turnover_unit_label(self) -> str:
         """Return the turnover unit label for the current market/language."""
         if self.region == "us":
-            return "USD bn" if self._get_review_language() == "en" else "十亿美元"
+            return "USD 100m" if self._get_review_language() == "en" else "亿美元"
         if self.region == "hk":
             return "HKD bn" if self._get_review_language() == "en" else "十亿港元"
         if self.region == "jp":
@@ -214,7 +214,9 @@ class MarketAnalyzer:
         """Format raw turnover according to market-specific units."""
         if amount_raw == 0.0:
             return "N/A"
-        if self.region in ("us", "hk", "jp", "kr"):
+        if self.region == "us":
+            return f"{amount_raw / 1e8:.2f}"
+        if self.region in ("hk", "jp", "kr"):
             return f"{amount_raw / 1e9:.2f}"
         if amount_raw > 1e6:
             return f"{amount_raw / 1e8:.0f}"
@@ -225,7 +227,9 @@ class MarketAnalyzer:
         unit = self._get_turnover_unit_label()
         if amount_raw == 0.0:
             return f"N/A ({unit})"
-        if self.region in ("us", "hk", "jp", "kr"):
+        if self.region == "us":
+            return f"{amount_raw / 1e8:.2f} {unit}"
+        if self.region in ("hk", "jp", "kr"):
             return f"{amount_raw / 1e9:.2f} {unit}"
         if amount_raw > 1e6:
             return f"{amount_raw / 1e8:.0f} {unit}"

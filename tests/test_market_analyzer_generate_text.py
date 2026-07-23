@@ -3418,7 +3418,7 @@ Sector text.
         result = ma._build_indices_block(overview)
 
         assert "CNY 100m" not in result
-        assert "Turnover (USD bn)" in result
+        assert "Turnover (USD 100m)" in result
         assert "| S&P 500 | 5200.00 |" in result
 
     def test_indices_block_uses_configured_red_up_color_scheme(self):

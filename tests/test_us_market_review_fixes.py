@@ -7,7 +7,7 @@ These tests pin the contract changes required by the post-staging audit:
 * US payload must NOT carry limit_up_count / limit_down_count.
 * US market-light snapshot must NOT include the limit dimension.
 * US breadth + index both available => data_quality == "ok".
-* Raw USD turnover (189_727_840_037) must format to ~189.73 十亿美元.
+* Raw USD turnover (189_727_840_037) must format to ~1897.28 亿美元.
 * US stats block must NOT contain "两市成交额" or "亿元".
 * CN stats block must STILL contain correct 亿元 / 涨跌停 wording.
 * market_stats_source / market_stats_sample_size must flow from fetcher to payload.
@@ -42,7 +42,7 @@ def _make_us_analyzer() -> MarketAnalyzer:
     analyzer._get_output_language = MagicMock(return_value="zh")
     analyzer._get_review_title = MagicMock(return_value="# 美股大盘复盘")
     analyzer._get_market_scope_name = MagicMock(return_value="美股")
-    analyzer._get_turnover_unit_label = MagicMock(return_value="十亿美元")
+    analyzer._get_turnover_unit_label = MagicMock(return_value="亿美元")
     analyzer._supports_market_light = MagicMock(return_value=True)
     return analyzer
 
@@ -134,7 +134,7 @@ class TestUsPayloadStructure(unittest.TestCase):
 
 
 class TestUsTurnoverUnitFormatting(unittest.TestCase):
-    """需求 #1: 189727840037 USD → ~189.73 十亿美元。"""
+    """需求 #1: 189727840037 USD → ~1897.28 亿美元。"""
 
     def test_us_turnover_formatted_as_billion_usd(self):
         analyzer = _make_us_analyzer()
@@ -148,9 +148,9 @@ class TestUsTurnoverUnitFormatting(unittest.TestCase):
         )
 
         self.assertEqual(payload["breadth"]["total_amount"], 189_727_840_037.0)
-        self.assertEqual(payload["breadth"]["turnover_unit"], "十亿美元")
+        self.assertEqual(payload["breadth"]["turnover_unit"], "亿美元")
         self.assertIn("formatted_turnover", payload["breadth"])
-        self.assertIn("189.73", payload["breadth"]["formatted_turnover"])
+        self.assertIn("1897.28", payload["breadth"]["formatted_turnover"])
 
     def test_cn_stats_block_keeps_yi_unit(self):
         """CN 必须仍以亿元呈现，且 stats block 保留两市成交额/涨跌停。"""
@@ -193,7 +193,7 @@ class TestUsTurnoverUnitFormatting(unittest.TestCase):
         block = analyzer._build_stats_block(overview)
 
         self.assertIn("样本成交额", block)
-        self.assertIn("189.73 十亿美元", block)
+        self.assertIn("1897.28 亿美元", block)
         self.assertIn("moomoo_us_exchange_universe", block)
         self.assertIn("2,000", block)
         self.assertNotIn("两市成交额", block)
@@ -205,8 +205,8 @@ class TestUsTurnoverUnitFormatting(unittest.TestCase):
 
         report = analyzer._generate_template_review(overview, [])
 
-        self.assertIn("189.73 十亿美元", report)
-        self.assertIn("成交额(十亿美元)", report)
+        self.assertIn("1897.28 亿美元", report)
+        self.assertIn("成交额(亿美元)", report)
         self.assertNotIn("两市成交额", report)
         self.assertNotIn("189727840037 亿", report)
         self.assertNotIn("成交额(亿)", report)
@@ -245,7 +245,7 @@ class TestUsDescribeTurnover(unittest.TestCase):
 
 class TestUsEnglishFallbackTurnover(unittest.TestCase):
     """验收 #4: 英文 fallback 不得直接渲染 overview.total_amount 原始数字，
-    必须走 region-aware formatter；189_727_840_037 USD 必须显示约 189.73 USD bn。"""
+    必须走 region-aware formatter；189_727_840_037 USD 必须显示约 1897.28 USD 100m。"""
 
     def _make_us_en_analyzer(self) -> MarketAnalyzer:
         analyzer = MarketAnalyzer.__new__(MarketAnalyzer)
@@ -256,7 +256,7 @@ class TestUsEnglishFallbackTurnover(unittest.TestCase):
         analyzer._get_output_language = MagicMock(return_value="en")
         analyzer._get_review_title = MagicMock(return_value="# Market Review")
         analyzer._get_market_scope_name = MagicMock(return_value="US market")
-        analyzer._get_turnover_unit_label = MagicMock(return_value="USD bn")
+        analyzer._get_turnover_unit_label = MagicMock(return_value="USD 100m")
         analyzer._supports_market_light = MagicMock(return_value=True)
         return analyzer
 
@@ -266,9 +266,9 @@ class TestUsEnglishFallbackTurnover(unittest.TestCase):
 
         stats = analyzer._build_stats_block(overview)
 
-        # 189_727_840_037 USD 应渲染为 189.73 USD bn（连续无空格的 189727840037 不该出现）
-        self.assertIn("189.73", stats)
-        self.assertIn("USD bn", stats)
+        # 189_727_840_037 USD 应渲染为 1897.28 USD 100m（原始数字不该出现）
+        self.assertIn("1897.28", stats)
+        self.assertIn("USD 100m", stats)
         self.assertNotIn("189727840037", stats)
 
     def test_us_prompt_stats_block_uses_region_formatter(self):
@@ -277,8 +277,8 @@ class TestUsEnglishFallbackTurnover(unittest.TestCase):
 
         prompt = analyzer._build_review_prompt(overview, [])
 
-        self.assertIn("189.73", prompt)
-        self.assertIn("USD bn", prompt)
+        self.assertIn("1897.28", prompt)
+        self.assertIn("USD 100m", prompt)
         self.assertNotIn("189727840037", prompt)
 
     def test_cn_en_fallback_keeps_yi(self):

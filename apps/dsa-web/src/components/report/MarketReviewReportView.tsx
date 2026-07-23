@@ -249,8 +249,15 @@ const formatMarketAmount = (value: unknown, unit?: string): string => {
   if (!unit) {
     return numericValue.toFixed(0);
   }
-  // Backend stores raw turnover; UI scales per region to keep numbers readable.
-  // CN uses 亿 (1e8); US/HK/JP/KR use 十亿 (1e9) of the local currency.
+  // Backend stores raw turnover; UI scales according to the explicit unit.
+  // New US payloads use USD 100m / 亿美元. Keep USD bn / 十亿美元 support
+  // so historical reports continue to render with their original scale.
+  const isUsdHundredMillion =
+    unit.startsWith('USD 100m') ||
+    unit === '亿美元';
+  if (isUsdHundredMillion) {
+    return `${(numericValue / 1e8).toFixed(2)} ${unit}`;
+  }
   const isLocalCurrencyBillion =
     unit.startsWith('USD bn') ||
     unit.startsWith('HKD bn') ||

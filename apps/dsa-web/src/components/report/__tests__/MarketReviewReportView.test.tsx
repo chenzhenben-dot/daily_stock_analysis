@@ -347,7 +347,7 @@ describe('MarketReviewReportView', () => {
     expect(screen.queryByText(/0\.440797/)).not.toBeInTheDocument();
   });
 
-  it('scales raw USD turnover into USD bn and shows Moomoo source/sample size', () => {
+  it('scales raw USD turnover into USD 100m and shows Moomoo source/sample size', () => {
     const payload: MarketReviewPayload = {
       version: 1,
       kind: 'market_review',
@@ -360,7 +360,7 @@ describe('MarketReviewReportView', () => {
         downCount: 913,
         flatCount: 104,
         totalAmount: 189727840037,
-        turnoverUnit: '十亿美元',
+        turnoverUnit: '亿美元',
         marketStatsSource: 'moomoo_us_exchange_universe',
         marketStatsSampleSize: 2000,
       },
@@ -380,7 +380,7 @@ describe('MarketReviewReportView', () => {
       />,
     );
 
-    expect(screen.getByText('189.73 十亿美元')).toBeInTheDocument();
+    expect(screen.getByText('1897.28 亿美元')).toBeInTheDocument();
     expect(
       screen.getByText('来源：Moomoo · 覆盖样本：2,000 只'),
     ).toBeInTheDocument();
