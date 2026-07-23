@@ -361,6 +361,26 @@ class TestUsMarketReviewSourceTransparency(unittest.TestCase):
         self.assertEqual(overview.market_stats_sample_size, 2000)
         self.assertEqual(overview.total_amount, 1.2e11)
 
+    def test_cn_rejects_us_scoped_moomoo_market_statistics(self):
+        analyzer = _make_cn_analyzer()
+        analyzer.data_manager = MagicMock()
+        analyzer.data_manager.get_market_stats.return_value = {
+            "up_count": 819,
+            "down_count": 1063,
+            "flat_count": 118,
+            "total_amount": 179599561831,
+            "source": "moomoo_us_exchange_universe",
+            "sample_size": 2000,
+        }
+        overview = MarketOverview(date="2026-07-23")
+
+        analyzer._get_market_statistics(overview)
+
+        self.assertEqual(overview.up_count, 0)
+        self.assertEqual(overview.down_count, 0)
+        self.assertEqual(overview.total_amount, 0.0)
+        self.assertIsNone(overview.market_stats_source)
+
 
 class TestUsMarketIndicesCoverage(unittest.TestCase):
     """需求 #6: 纳斯达克100 必须始终保留在美股指数列表。"""

@@ -177,6 +177,29 @@ const hasStructuredMarketData = (payload?: MarketReviewPayload | null): boolean 
   Boolean(payload?.breadth || payload?.indices?.length || payload?.macro?.length
     || hasRankingRows(payload?.sectors) || hasRankingRows(payload?.concepts));
 
+const normalizeBreadthForRegion = (
+  breadth: MarketReviewPayload['breadth'],
+  region: string,
+  language?: string,
+): MarketReviewPayload['breadth'] => {
+  if (!breadth) return undefined;
+
+  const source = breadth.marketStatsSource || '';
+  const isMoomooUsStats = source.startsWith('moomoo_');
+  if (isMoomooUsStats && region !== 'us') {
+    return undefined;
+  }
+
+  const unit = breadth.turnoverUnit;
+  if (isMoomooUsStats && region === 'us' && ['亿', '亿元', 'CNY 100m'].includes(unit || '')) {
+    return {
+      ...breadth,
+      turnoverUnit: language === 'en' ? 'USD 100m' : '亿美元',
+    };
+  }
+  return breadth;
+};
+
 const getStructuredMarketData = (payload?: MarketReviewPayload | null): StructuredMarketData[] => {
   if (!payload) {
     return [];
@@ -188,7 +211,7 @@ const getStructuredMarketData = (payload?: MarketReviewPayload | null): Structur
       .map(([region, marketPayload]) => ({
         id: region,
         title: marketPayload.title || region.toUpperCase(),
-        breadth: marketPayload.breadth,
+        breadth: normalizeBreadthForRegion(marketPayload.breadth, region, marketPayload.language),
         indices: marketPayload.indices || [],
         sectors: marketPayload.sectors,
         concepts: marketPayload.concepts,
@@ -203,7 +226,7 @@ const getStructuredMarketData = (payload?: MarketReviewPayload | null): Structur
   return [{
     id: payload.region || 'market',
     title: payload.title,
-    breadth: payload.breadth,
+    breadth: normalizeBreadthForRegion(payload.breadth, payload.region || 'market', payload.language),
     indices: payload.indices || [],
     sectors: payload.sectors,
     concepts: payload.concepts,

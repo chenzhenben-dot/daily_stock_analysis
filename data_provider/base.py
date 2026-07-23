@@ -712,6 +712,7 @@ class DataFetcherManager:
         max_workers: int = 4,
         overall_timeout: float = 30.0,
         purpose: str = "",
+        excluded_fetcher_names: Optional[set[str]] = None,
     ) -> Any:
         """B1+B2: run multiple fetchers in parallel, return first non-empty result.
 
@@ -722,6 +723,8 @@ class DataFetcherManager:
         candidates = [f for f in self._get_fetchers_snapshot() if hasattr(f, method_name)]
         # TickFlowFetcher has its own path; skip here
         candidates = [f for f in candidates if f.name != "TickFlowFetcher"]
+        if excluded_fetcher_names:
+            candidates = [f for f in candidates if f.name not in excluded_fetcher_names]
         if not candidates:
             return None
 
@@ -2711,6 +2714,9 @@ class DataFetcherManager:
             max_workers=4,
             overall_timeout=30.0,
             purpose=purpose,
+            # MoomooFetcher's market-stats contract is US-only. Without this
+            # guard its fast US response can win the CN/HK/JP/KR fallback race.
+            excluded_fetcher_names={"MoomooFetcher"} if market_region != "us" else None,
         )
         if data:
             return data

@@ -387,6 +387,46 @@ describe('MarketReviewReportView', () => {
     expect(screen.queryByText('涨停/跌停')).not.toBeInTheDocument();
   });
 
+  it('rejects US-only Moomoo breadth under A-shares and repairs its legacy US unit', () => {
+    const market = (region: string, title: string): MarketReviewPayload => ({
+      version: 1,
+      kind: 'market_review',
+      region,
+      language: 'zh',
+      title,
+      breadth: {
+        upCount: 819,
+        downCount: 1063,
+        totalAmount: 179599561831,
+        turnoverUnit: '亿',
+        marketStatsSource: 'moomoo_us_exchange_universe',
+        marketStatsSampleSize: 2000,
+      },
+      indices: [],
+      sectors: { top: [], bottom: [] },
+      concepts: { top: [], bottom: [] },
+      news: [],
+      sections: [],
+      markdownReport: '',
+    });
+    const payload: MarketReviewPayload = {
+      ...market('cn,us', '大盘复盘'),
+      markets: {
+        cn: market('cn', 'A股大盘复盘'),
+        us: market('us', '美股大盘复盘'),
+      },
+    };
+
+    render(<MarketReviewReportView payload={payload} content="# 大盘复盘" reportLanguage="zh" />);
+
+    expect(screen.queryByText('179599561831 亿')).not.toBeInTheDocument();
+    expect(screen.queryByText('来源：Moomoo · 覆盖样本：2,000 只')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '美股大盘复盘' }));
+    expect(screen.getByText('1796.00 亿美元')).toBeInTheDocument();
+    expect(screen.getByText('来源：Moomoo · 覆盖样本：2,000 只')).toBeInTheDocument();
+  });
+
   it('renders an unavailable NDX100 row without showing zero as a real index value', () => {
     const payload: MarketReviewPayload = {
       version: 1,

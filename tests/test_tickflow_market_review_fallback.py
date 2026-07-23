@@ -159,6 +159,30 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
         self.assertEqual(data["up_count"], 1)
         self.assertEqual(fallback.stats_calls, 1)
 
+    def test_cn_market_stats_never_uses_us_only_moomoo_stats(self):
+        manager = DataFetcherManager.__new__(DataFetcherManager)
+        moomoo = _DummyFetcher(
+            "MoomooFetcher",
+            stats={
+                "up_count": 819,
+                "down_count": 1063,
+                "total_amount": 179599561831,
+                "source": "moomoo_us_exchange_universe",
+            },
+        )
+        cn_fallback = _DummyFetcher(
+            "AkshareFetcher",
+            stats={"up_count": 3200, "down_count": 1800, "total_amount": 18000},
+        )
+        manager._fetchers = [moomoo, cn_fallback]
+        manager._get_tickflow_fetcher = lambda: None
+
+        data = DataFetcherManager.get_market_stats(manager, purpose="market_review:cn")
+
+        self.assertEqual(data["up_count"], 3200)
+        self.assertEqual(moomoo.stats_calls, 0)
+        self.assertEqual(cn_fallback.stats_calls, 1)
+
     @patch("src.config.get_config")
     def test_manager_skips_tickflow_without_api_key(self, mock_get_config):
         mock_get_config.return_value = SimpleNamespace(tickflow_api_key=None)

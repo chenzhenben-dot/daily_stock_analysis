@@ -580,13 +580,22 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             stats = self.data_manager.get_market_stats(purpose=f"market_review:{self.region}")
 
             if stats:
+                stats_source = stats.get('source') or stats.get('market_stats_source')
+                if self.region != "us" and str(stats_source or "").startswith("moomoo_"):
+                    logger.error(
+                        "[大盘] %s action=get_market_stats status=rejected "
+                        "reason=region_source_mismatch source=%s",
+                        self._log_context(),
+                        stats_source,
+                    )
+                    return
                 overview.up_count = stats.get('up_count', 0)
                 overview.down_count = stats.get('down_count', 0)
                 overview.flat_count = stats.get('flat_count', 0)
                 overview.limit_up_count = stats.get('limit_up_count', 0)
                 overview.limit_down_count = stats.get('limit_down_count', 0)
                 overview.total_amount = stats.get('total_amount', 0.0)
-                overview.market_stats_source = stats.get('source') or stats.get('market_stats_source')
+                overview.market_stats_source = stats_source
                 overview.market_stats_sample_size = (
                     stats.get('sample_size')
                     if stats.get('sample_size') is not None
