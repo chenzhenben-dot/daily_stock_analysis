@@ -177,6 +177,26 @@ const hasStructuredMarketData = (payload?: MarketReviewPayload | null): boolean 
   Boolean(payload?.breadth || payload?.indices?.length || payload?.macro?.length
     || hasRankingRows(payload?.sectors) || hasRankingRows(payload?.concepts));
 
+const getTurnoverUnitForRegion = (region: string, language?: string): string => {
+  const normalizedRegion = region.trim().toLowerCase();
+  const englishUnits: Record<string, string> = {
+    cn: 'CNY 100m',
+    hk: 'HKD bn',
+    us: 'USD 100m',
+    jp: 'JPY bn',
+    kr: 'KRW bn',
+  };
+  const localizedUnits: Record<string, string> = {
+    cn: '亿',
+    hk: '十亿港元',
+    us: '亿美元',
+    jp: '十亿日元',
+    kr: '十亿韩元',
+  };
+  const units = language === 'en' ? englishUnits : localizedUnits;
+  return units[normalizedRegion] || units.cn;
+};
+
 const normalizeBreadthForRegion = (
   breadth: MarketReviewPayload['breadth'],
   region: string,
@@ -191,10 +211,12 @@ const normalizeBreadthForRegion = (
   }
 
   const unit = breadth.turnoverUnit;
-  if (isMoomooUsStats && region === 'us' && ['亿', '亿元', 'CNY 100m'].includes(unit || '')) {
+  const expectedUnit = getTurnoverUnitForRegion(region, language);
+  const hasWrongChinaUnit = region !== 'cn' && ['亿', '亿元', 'CNY 100m'].includes(unit || '');
+  if (!unit || hasWrongChinaUnit || (isMoomooUsStats && region === 'us' && unit === 'USD')) {
     return {
       ...breadth,
-      turnoverUnit: language === 'en' ? 'USD 100m' : '亿美元',
+      turnoverUnit: expectedUnit,
     };
   }
   return breadth;
@@ -295,7 +317,7 @@ const formatMarketAmount = (value: unknown, unit?: string): string => {
   }
   // Fallback (e.g. CNY 100m / 亿元): render the value as-is, scaled by 1e8 when
   // the backend has already provided raw CNY.
-  if (numericValue > 1e6 && (unit === '亿元' || unit === 'CNY 100m')) {
+  if (numericValue > 1e6 && (unit === '亿' || unit === '亿元' || unit === 'CNY 100m')) {
     return `${(numericValue / 1e8).toFixed(2)} ${unit}`;
   }
   return `${numericValue.toFixed(0)} ${unit}`;

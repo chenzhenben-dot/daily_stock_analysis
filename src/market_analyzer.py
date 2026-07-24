@@ -1260,7 +1260,11 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 continue
             arrow = self._get_index_change_arrow(idx.change_pct)
             amount_raw = idx.amount or 0.0
-            amount_str = self._format_turnover_value(amount_raw)
+            # 每个 cell 必须带 region 推导的单位 label；数据缺失则显示 N/A，不拼接原始数字。
+            if amount_raw <= 0:
+                amount_str = "N/A"
+            else:
+                amount_str = f"{self._format_turnover_value(amount_raw)} {self._get_turnover_unit_label()}"
             lines.append(
                 f"| {idx.name} | {idx.current:.2f} | {arrow} {idx.change_pct:+.2f}% | "
                 f"{self._format_optional_number(idx.open)} | {self._format_optional_number(idx.high)} | "
